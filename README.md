@@ -21,13 +21,13 @@
   <img src="docs/images/hero.jpg" width="640" alt="AI Mac 小屏幕">
 </p>
 
-一块 240×240 的复古小电视，放在桌上实时显示 **Claude Code / Codex CLI 在干什么、额度还剩多少**。不需要任何 API key：数据来自本机已有的 CLI 登录凭据和会话日志，由配套的 Mac / Windows 桥接程序在局域网内提供给设备。
+一块 240×240 的复古小电视，放在桌上实时显示 **Claude Code / Codex CLI 在干什么、额度还剩多少**。不需要任何 API key：桥接程序读取本机已有的 CLI 登录凭据和会话日志，Windows 优先通过 USB 直连设备，macOS 及 Windows 无线回退通过局域网连接。
 
 ## 功能
 
 | | |
 |---|---|
-| <img src="docs/images/feature1.jpg" width="360" alt="AI 工作状态"> | **AI 工作状态与额度**<br>桌宠动起来 = AI 正在干活。Claude/Codex 显示供应商返回的真实额度；国产模型页聚合千问和小米 MiMo，显示实际模型名、今日 token 及可获得的 Token Plan / 5h / 周指标。未知额度显示 `--`，不做估算。 |
+| <img src="docs/images/feature1.jpg" width="360" alt="AI 工作状态"> | **AI 工作状态与额度**<br>桌宠动起来 = AI 正在干活。Claude/Codex 显示供应商返回的真实额度；国产模型页聚合千问和小米 MiMo，显示本机会话里识别到的模型名和今日 token。阿里云百炼授权后可读取并缓存准确的千问 Token Plan 百分比；未知额度显示 `--`，不做估算。 |
 | <img src="docs/images/feature2.jpg" width="360" alt="系统监控"> | **系统实时监控**<br>任务管理器风格的上下行曲线，56 秒滚动窗口，量程自动调整，并同步显示 Windows CPU 与内存占用。 |
 | <img src="docs/images/music.jpg" width="360" alt="音乐播放"> | **音乐播放显示**<br>专辑封面、歌名、歌手、进度条实时同步；音乐响起自动切入，停止自动切回。 |
 | | **天气时钟与股票行情**<br>天气页采用大号时分秒、城市/天气/空气质量、温度和湿度布局；股票页最多显示 4 只 A股/港股/美股，按国内习惯涨红跌绿。两页均由 Windows 桥接获取数据、失败时保留最近成功值，并支持 USB 直推。 |
@@ -58,7 +58,7 @@ USB 桥接也没有连上 WiFi，才会开启热点 **`AI-Clock-Setup`**：手�
 - **macOS**：`AIClockBridge-*-macOS.dmg`，拖入 Applications（ad-hoc 签名，首次启动需在「系统设置 → 隐私与安全性」允许，并同意本地网络权限）
 - **Windows**：`AIClockBridge-*-Windows-x64.exe`，双击即用
 
-桥接程序常驻菜单栏 / 托盘，会**自动发现并配对**同一局域网内的设备——到这里屏幕就活了。
+桥接程序常驻菜单栏 / 托盘。Windows 连接 USB 数据线后直接通过 COM 握手，不要求电脑和设备在局域网互通；macOS 和 Windows 的无线回退会自动发现并配对同一局域网内的设备。
 
 <p align="center">
   <img src="docs/images/working.jpg" width="640" alt="工作演示">
@@ -75,8 +75,7 @@ USB 桥接也没有连上 WiFi，才会开启热点 **`AI-Clock-Setup`**：手�
   程序会自动通过 COM 串口直连；状态、网速、音乐（含封面和中文）、天气、股票、显示控制、桌宠上传和
   镜像动画都不再依赖局域网互访。USB 断开后自动回退原有 WiFi HTTP 通道。
 - **额度一直显示 `-` / `--`**：代表供应商没有返回可验证的额度数据；不是连接故障。
-  国产模型的模型名和今日 token 仍会从本机会话日志统计。Claude 页只统计真正的
-  `claude-*` 模型，不统计通过 Claude Code 客户端调用的千问或 MiMo。
+  千问 Token Plan 需要在 Windows 托盘的「模型额度 → 国产模型额度授权」登录一次；登录状态持久化 30 天，成功读取时自动续期。国产模型的模型名和今日 token 来自本机 Claude Code 会话日志，只覆盖写入这些日志的调用，并不等于阿里账号下所有应用的总消耗。Claude 页只统计真正的 `claude-*` 模型，不统计通过 Claude Code 客户端调用的千问或 MiMo。
 - **想换桌宠**：右键托盘图标 → 「更换桌宠动画…」，挑一个点上传就行。
 
 ## 开发

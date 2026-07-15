@@ -1,9 +1,9 @@
 # AIClockBridge for Windows
 
-`mac-app/` 菜单栏桥接的 Windows 移植版：同一套功能、同一套设备协议（固件感知不到
-桥接跑在哪个系统上），以系统托盘图标形式常驻。
+`mac-app/` 菜单栏桥接的 Windows 移植与扩展版：复用同一套基础设备协议，并增加 USB
+直连、天气、股票、国产模型额度和 CPU/内存监控，以系统托盘图标形式常驻。
 
-功能与 Mac 版一致：
+Windows 版功能：
 
 - **左键托盘图标** → ESP8266 屏幕实时镜像（账号套餐徽标 + 额度环 + 桌宠动画 + 国产模型
   聚合页 + 系统监控 + 音乐页，与设备渲染同一份数据），底部附
@@ -18,14 +18,16 @@
 额度窗口按返回的实际时长识别，因此供应商临时关闭 5h 限制时会显示 `5h -`，周额度仍正常显示并驱动进度环。
 额度请求暂时失败时继续显示最近一次成功结果；该结果会缓存在 `%APPDATA%\AIClockBridge\usage-cache.json`，
 因此断网重启 Windows 后也不会立刻变成空白。下次请求成功时自动覆盖缓存并更新屏幕。
-- **国产模型聚合页**：当前先识别 Claude Code JSONL 中实际使用的千问（`qwen*`）和
-  小米 MiMo（`mimo*`）模型，分别显示当前模型名和今日 token。Token Plan、5h、Weekly
-  只有供应商返回可验证的真实值时才显示；当前阿里云百炼和小米 Token Plan 没有面向模型
-  API key 的公开额度查询接口，所以显示 `--`，不会拿会话时长伪造百分比。Claude 页只统计
-  `claude-*` 模型，不再把通过 Claude Code 客户端调用的千问算成 Claude 用量。
+- **国产模型聚合页**：识别 Claude Code JSONL 中实际使用的千问（`qwen*`）和小米 MiMo
+  （`mimo*`）模型，显示最近模型名和本机日志中的今日 token。这个数字只覆盖写入 Claude
+  Code 会话日志的调用，不等于同一个 Token Plan 被所有应用消耗的总量。Token Plan、5h、
+  Weekly 只有供应商返回可验证的真实值时才显示，不拿会话时长伪造百分比。Claude 页只统计
+  `claude-*` 模型，不把通过 Claude Code 客户端调用的千问算成 Claude 用量。
 - **国产模型额度授权**：左侧厂商导航列出阿里云百炼、小米 MiMo、智谱、火山方舟、
   月之暗面、MiniMax、DeepSeek、百度千帆、腾讯混元、华为盘古、讯飞星火、阶跃星辰、
-  百川和零一万物。千问、小米已接入准确额度捕获；其余厂商提供登录入口并明确标为待接。
+  百川和零一万物。阿里云百炼已实机验证准确 Token Plan 捕获；小米已预留响应规则但尚未用
+  真实订阅账号验证，其余厂商提供登录入口并明确标为待接。阿里云登录状态保留 30 天，
+  每次成功读取自动续期；供应商主动撤销会话后需要重新登录。
 - **USB 优先桥接**：小时钟经 CH340 数据线连接时，App 自动识别 COM 口并通过
   460800 串口下发状态、网速、完整音乐画面、天气、股票，以及显示模式/亮度控制；GIF 桌宠上传和镜像
   动画读取同样走 USB。大数据采用 COBS 二进制分块、逐块 CRC/ACK 和整包 CRC；USB 连续
@@ -63,8 +65,8 @@ dotnet publish -c Release -r win-x64 --self-contained false
 # 产物在 bin\Release\net8.0-windows10.0.19041.0\win-x64\publish\AIClockBridge.exe
 ```
 
-首次启动 Windows 会弹防火墙授权（HTTP 服务监听 0.0.0.0:8765，设备要从局域网访问，
-选"允许"）。
+首次启动 Windows 会弹防火墙授权。USB 直连不依赖这项权限；需要使用无线回退时，HTTP
+服务监听 `0.0.0.0:8765`，应选“允许”让设备从局域网访问。
 
 如果小时钟通过 USB 数据线直连电脑，基础状态和控制不再要求两个设备能在局域网中互访。
 App 会优先按 CH340 的 VID/PID 筛选 COM 口，再用协议握手确认设备；烧录固件前应先退出
@@ -79,10 +81,22 @@ App 会优先按 CH340 的 VID/PID 筛选 COM 口，再用协议握手确认设�
 ## 验证
 
 ```powershell
+dotnet build windows-app\AIClockBridge\AIClockBridge.csproj -c Release
 curl.exe -s http://localhost:8765/status | python -m json.tool
+# 设备已连接时，覆盖状态、天气、股票、音乐、GIF 和页面缓存：
+windows-app\AIClockBridge\bin\Release\net8.0-windows10.0.19041.0\AIClockBridge.exe --test-usb
 ```
 
-配置持久化在 `%APPDATA%\AIClockBridge\settings.json`（设备地址等）。
+主要运行数据：
+
+| 路径 | 内容 |
+|---|---|
+| `%APPDATA%\AIClockBridge\settings.json` | 设备地址、串口和显示/循环/天气设置 |
+| `%APPDATA%\AIClockBridge\usage-cache.json` | Claude/Codex 最近一次成功额度，不含凭据 |
+| `%APPDATA%\AIClockBridge\domestic-quota-cache.json` | 国产模型最近一次准确额度，不含 Cookie |
+| `%APPDATA%\AIClockBridge\weather-cache.json` | 最近一次成功天气 |
+| `%APPDATA%\AIClockBridge\quota-auth-profile` | 国产模型授权专用 WebView2 profile |
+| `%LOCALAPPDATA%\AIClockBridge\petdex-v1.json` | petdex manifest 缓存 |
 
 ## 代码结构
 
@@ -95,7 +109,11 @@ curl.exe -s http://localhost:8765/status | python -m json.tool
 | `PetdexService.cs` | `PetdexService.swift` | manifest / 精灵图 / GIF 合成 |
 | `StatusService.cs` | `StatusReader.swift` | JSONL 日志扫描 + hook 事件 |
 | `UsageFetcher.cs` | `UsageFetcher.swift` | 官方额度接口 |
+| `DomesticQuotaService.cs` | — | 国产厂商目录、控制台额度捕获和登录保持 |
+| `SerialBridge.cs` | — | CH340 自动识别、JSON 控制帧和 COBS 二进制传输 |
+| `StartupManager.cs` | — | 当前用户 Windows 自启动 |
 | `NetSpeedMonitor.cs` | `NetSpeedMonitor.swift` | 4Hz 网速采样环 |
+| `SystemStatsMonitor.cs` | — | Windows CPU 与物理内存占用 |
 | `NowPlayingMonitor.cs` | `NowPlayingMonitor.swift` | 系统 Now Playing + 封面/文字条 RGB565 |
 | `StockMonitor.cs` | — | 自选股行情 + 中文名称 RGB565 |
 | `WeatherMonitor.cs` | — | 城市天气/空气质量 + 断网缓存 + 中文标题 RGB565 |

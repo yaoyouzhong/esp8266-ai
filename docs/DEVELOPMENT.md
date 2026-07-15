@@ -14,11 +14,11 @@
   - Claude：Keychain 里的 `Claude Code-credentials` → `api.anthropic.com/api/oauth/usage`
   - Codex：`~/.codex/auth.json` → `chatgpt.com/backend-api/wham/usage`
 
-架构：`mac-app/` 是一个 **Swift 原生菜单栏 app**（Windows 用户用 `windows-app/`，
-功能一致的 C# 托盘移植版），读日志、开一个本地 HTTP 服务；
-`firmware/` 是 ESP8266 固件，联网后每 15 秒轮询这个服务，把时间 + 状态画到 240x240
-ST7789 彩屏上。桌宠动画（GIF）的上传和解码**全部在 ESP8266 板子上完成**，换形象不再需要
-电脑参与（详见第 4 节）。
+架构：`mac-app/` 是原始的 **Swift 原生菜单栏 app**；`windows-app/` 是 C# 托盘移植版，
+并扩展了 USB 直连、天气、股票、国产模型额度和 CPU/内存监控。两者都能读取本地状态并提供
+HTTP 服务；Windows 在 USB 可用时改为主动串口推送。`firmware/` 在无线模式下每 5 秒轮询
+状态服务，把数据画到 240x240 ST7789 彩屏上。桌宠动画（GIF）的上传和解码**全部在
+ESP8266 板子上完成**，换形象不需要重新烧录（详见第 4 节）。
 
 Windows 版另有 USB 优先传输，CH340 串口为 460800：小型控制帧以 `@AICLOCK ` 开头，
 后接单行 JSON（协议 `version=1`）；图片/GIF/动画使用 `NUL + COBS + NUL` 二进制分块，
@@ -38,8 +38,8 @@ tools/        GIF -> RGB565 默认精灵图头文件的转换脚本（改编译�
 
 ## 1. 跑起 Mac 端菜单栏 app
 
-> Windows 用户：功能一致的托盘版见 [`windows-app/README.md`](windows-app/README.md)，
-> 本节其余说明（左右键交互、自动配对、数据来源）同样适用。
+> Windows 用户：功能更完整的托盘版见 [`windows-app/README.md`](../windows-app/README.md)。
+> Windows 的 USB、天气、股票和国产模型授权行为以该文档为准，不要套用本节的 Mac 说明。
 
 需要 Xcode / Swift 工具链（macOS 自带 `swift`）。
 
@@ -134,7 +134,7 @@ LaunchAgent（`~/Library/LaunchAgents/`）即可，未内置，按需再加。
 cd firmware
 python3 -m venv .pio-venv && source .pio-venv/bin/activate
 pip install platformio
-pio run -t upload          # 已验证：编译成功，Flash 45.7%，RAM 39.7%
+pio run -t upload          # 2026-07-15 验证：Flash 82.9%，RAM 54.9%
 ```
 
 烧录后串口会打印调试日志（这版固件不再是"静默"的）：
@@ -164,7 +164,7 @@ pio device monitor -b 460800
 - **只有一方在工作** → 固定显示正在工作的那个
 - **两方都在工作** → 每 2 秒交替
 - **都空闲** → 每 6 秒慢速交替
-- Mac 菜单栏里也可以强制固定显示某一方（`POST /api/display`），固定后忽略上述规则
+- Mac 菜单栏或 Windows 托盘里也可以强制固定显示某一方（`POST /api/display`），固定后忽略上述规则
 
 视觉元素：
 
@@ -183,13 +183,13 @@ pio device monitor -b 460800
   的 `Notification`、Codex 的 `PermissionRequest` hook），设备整圈边框红色闪烁提醒你去
   确认；AUTO 模式还会自动切到那个待审批的角色（优先级高于音乐自动切换）。你在 CLI 里
   做出选择后（下一个工具调用/回合事件到达）自动停止闪烁，5 分钟无响应也会自动超时清除。
-  Mac 弹窗镜像同步显示红色边框闪烁。
+  Mac/Windows 弹窗镜像同步显示红色边框闪烁。
 
 ## 4. 自定义桌宠形象
 
-两个入口，推荐 Mac 菜单栏（petdex 画廊 + 预览），设备网页作为兜底：
+两个入口，推荐桥接程序的 petdex 画廊（含预览），设备网页作为兜底：
 
-1. **Mac 菜单栏 →「更换桌宠动画…」**：从 [petdex.dev](https://petdex.dev) 的公开
+1. **Mac 菜单栏 / Windows 托盘 →「更换桌宠动画…」**：从 [petdex.dev](https://petdex.dev) 的公开
    manifest（`assets.petdex.dev/manifests/petdex-v1.json`，3300+ 开源桌宠）搜索选择。
    每个桌宠是一张 1536x1872 的 WebP 精灵图（8 列 x 9 行，每帧 192x208，每行一种动画：
    待机/左右跑/挥手/跳跃/失败/等待/原地跑/思考）。app 在本地裁出所选动画行、缩放到
@@ -199,13 +199,14 @@ pio device monitor -b 460800
 两条路最终都走同一条链路：设备收到 GIF 后**自己在板上解码并缩放**，立刻替换该角色的
 动画，重启后也记得，**不需要重新编译或烧录固件**。
 
-### 设备 HTTP API（Mac app 用的就是这套）
+### 设备 HTTP API（Mac/Windows 桥接共用）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/info` | 设备状态 JSON：ip/ssid/bridge/显示模式/当前显示/自定义精灵标记 |
-| POST | `/api/display` | `mode=auto\|claude\|codex\|domestic\|net\|music\|stock\|weather` 切换屏幕显示 |
+| GET | `/api/info` | 设备状态 JSON：ip/ssid/bridge/配置模式/实际显示/自定义精灵和天气/股票页面缓存标记 |
+| POST | `/api/display` | `mode=auto\|claude\|codex\|dual\|domestic\|net\|music\|stock\|weather` 切换屏幕显示 |
 | POST | `/api/bridge` | `host=ip:port` 设置桥接地址 |
+| POST | `/api/brightness` | `level=0..100` 设置并持久化背光亮度 |
 | POST | `/sprite/claude`、`/sprite/codex` | multipart 上传 GIF 并板上解码替换 |
 | POST | `/sprite/claude/reset`、`/sprite/codex/reset` | 删除自定义动画，恢复内置形象 |
 | GET | `/sprite/claude/raw`、`/sprite/codex/raw` | 当前生效动画的原始帧流 `[1B帧数][RGB565大端帧...]`（镜像窗口用）|
@@ -214,8 +215,9 @@ pio device monitor -b 460800
 
 ## 5. 系统监控页（桥接程序 + 设备同步显示）
 
-Mac app 每 250ms（4Hz）读一次内核的网卡字节计数（getifaddrs/AF_LINK，只统计物理
-`en*` 网卡，避免 VPN/utun 重复计数），保留 3 分钟历史。
+桥接程序每 250ms（4Hz）读一次网卡字节计数并保留 3 分钟历史。Mac 使用
+getifaddrs/AF_LINK，只统计物理 `en*` 网卡；Windows 使用系统网络接口统计并排除 VPN/
+虚拟网卡，同时附带 CPU 与物理内存占用。
 
 显示模式切到「系统监控」后，设备端**渲染与网络完全解耦**：`GET /net` 返回带全局
 序号（seq）的最近 12 个 250ms 样本；Windows 桥接同时附带 CPU 与物理内存使用率。
@@ -228,16 +230,16 @@ Mac app 每 250ms（4Hz）读一次内核的网卡字节计数（getifaddrs/AF_L
 兼顾小屏可读性与交叉曲线辨识度。
 每帧从 224 个样本的数据环逐行合成像素、每行一次 `pushImage` 整行写屏——没有
 "先清屏再画"的过程，所以完全无闪烁。顶部大号 DL/UL 读数取 1 秒平均，只在数值
-变化时局部重绘。Mac 弹窗镜像用同一套数据模型和布局同步渲染。
+变化时局部重绘。桥接程序镜像用同一套数据模型和布局同步渲染。
 
 Mac 端常驻进程由 LaunchAgent（`~/Library/LaunchAgents/local.AIClockBridge.plist`，
 每 60 秒拉活 `mac-app/.build/AIClockBridge.app`）管理；**改代码后要把新二进制和
 资源包同步进这个 .app**（`cp .build/debug/AIClockBridge .build/AIClockBridge.app/Contents/MacOS/`），
 否则 LaunchAgent 会不断复活旧版本、和手动启动的新版本抢 8765 端口轮流应答。
 
-## 6. 音乐播放页（Mac + 设备同步显示，自动切换）
+## 6. 音乐播放页（桥接程序 + 设备同步显示，自动切换）
 
-**AUTO 模式下自动切换**：Mac 一有音频在播放（放歌、看视频都算），设备自动切到音乐
+**AUTO 模式下自动切换**：桥接程序检测到音频播放后（放歌、看视频都算），设备自动切到音乐
 页；停止后自动切回桌宠/额度页。机制：`/status` 带 `music_playing` 字段（状态轮询
 5 秒一次 → 开始播放约 5 秒内切入），音乐页显示时靠 `/music` 的 2 秒轮询快速检测停止
 （约 2 秒切回）。仅 AUTO 生效；手动固定某模式（含固定「音乐播放」）时不受影响。
@@ -246,13 +248,14 @@ Mac 端常驻进程由 LaunchAgent（`~/Library/LaunchAgents/local.AIClockBridge
 
 
 显示模式切到「音乐播放」（弹窗底部分段控件 / 右键菜单 / `POST /api/display mode=music`）
-后，Mac app 通过系统 Now Playing 信息读取当前播放的歌曲、歌手、播放进度和专辑封面，
+后，Mac 通过系统 Now Playing、Windows 通过 WinRT
+`GlobalSystemMediaTransportControlsSessionManager` 读取歌曲、歌手、进度和专辑封面，
 桥接服务提供：
 
 - `GET /music`：歌曲、歌手、专辑、播放状态、进度、封面版本号
 - `GET /music/cover.raw`：128x128 RGB565 封面原始像素，设备逐行读取后直接绘制
 
-设备每 2 秒刷新一次音乐信息；封面只有在版本号变化时重新拉取。Mac 弹窗镜像同样显示
+设备每 2 秒刷新一次音乐信息；封面只有在版本号变化时重新拉取。桥接程序镜像同样显示
 音乐页，方便不用看设备也能确认布局。
 
 ## 7. Hooks 实时状态（秒级，参考 clawd-on-desk 的做法）
@@ -271,7 +274,7 @@ Mac 端常驻进程由 LaunchAgent（`~/Library/LaunchAgents/local.AIClockBridge
 - 局限：事件是全局的不分会话——A 会话 Stop 会把还在干活的 B 会话压成 idle 最多 60 秒
   （B 的下一个工具调用事件会立刻翻回 working）。
 
-### GIF 上传架构
+## 8. GIF 上传架构
 
 架构：GIF 可通过 `ESP8266WebServer` multipart（`HTTPUpload` 回调）或 USB COBS 分块
 上传，两条路径都边收边写进 LittleFS 临时文件（`/c.gif` / `/x.gif`）。USB 路径先校验
@@ -300,15 +303,45 @@ ESP8266 总共只有 ~80KB RAM，一帧 120x120 的 RGB565 就 ~28KB，AnimatedG
   对循环角色动画来说无所谓。
 - WiFi 上传大文件偶尔会瞬时掉线（broken pipe 之类），失败重新上传一次即可。
 
+## 9. Windows 天气、股票与国产模型额度
+
+Windows 桥接提供以下只读端点，固件在 Wi-Fi 回退模式下读取；USB 正常时由
+`SerialBridge` 推送相同 JSON 和 RGB565 中文位图：
+
+| 路径 | 内容 |
+|---|---|
+| `GET /stock` | 最多 4 只自选股的代码、价格、涨跌幅和名称版本 |
+| `GET /stock/names.raw` | 4 行股票中文名称 RGB565 位图 |
+| `GET /weather` | 城市、天气、时分秒、最高/最低温、湿度、PM2.5 和动画类型 |
+| `GET /weather/header.raw` | 城市与天气中文位图 |
+| `GET /weather/date.raw` | `M月d日 周X` 中文日期位图 |
+| `GET /weather/air.raw` | 空气质量徽标位图 |
+
+天气每 15 分钟向 Open-Meteo 刷新；股票每 5 秒优先请求腾讯行情、失败后尝试新浪行情。
+网络失败时分别沿用 `%APPDATA%\AIClockBridge\weather-cache.json` 和进程内最近成功行情。
+Windows 会把股票名称和天气三块中文位图合并成 RLE 页面缓存推给设备；设备写入 LittleFS，
+切页时可立即显示，不再等待串口重传。`GET /api/info` 的 `ui_cache` 返回缓存状态和 CRC。
+
+国产模型有两条互相独立的数据源：
+
+- 模型名和 `tokens_today`：扫描 `%USERPROFILE%\.claude\projects\**\*.jsonl`，所以只统计
+  写入 Claude Code 会话日志的调用；其他应用即使共用同一个 Token Plan，也不会计入。
+- Token Plan 百分比：授权窗口在厂商控制台内读取账号页面已经返回的用量响应。阿里云百炼
+  路径已经实机验证，结果缓存到 `%APPDATA%\AIClockBridge\domestic-quota-cache.json`。
+
+阿里云登录使用 `%APPDATA%\AIClockBridge\quota-auth-profile` 的独立 WebView2 profile。
+登录成功后把会话 Cookie 持久化 30 天，每次成功读取额度自动续期；Cookie 值不写入额度
+JSON 缓存或日志。供应商主动撤销会话时仍需重新登录。
+
 ## 已知限制 / TODO
 
-- 参考项目里的“黄色闪烁-需要处理”“红色闪烁-需要批准”这类更细的状态，目前本地日志
-  拿不到可靠信号，没有实现，只做了 working/idle-离线/桥接离线 三档。
 - Mac 端 app 无鉴权，HTTP `/status` 监听 `0.0.0.0:8765`，仅建议在可信局域网使用；
   设备的 HTTP API 同样无鉴权。
 - Claude 用量接口有较严格的服务端限流（429），app 已做 60s 节流 + 429 后 5 分钟退避 +
   沿用旧值，偶尔菜单里额度会显示为几分钟前的数据。
-- 未做开机自启 LaunchAgent，需要的话可以再加（见第 1 节）。
+- 国产模型 `tokens_today` 目前不是厂商账号全量统计；跨应用的当日 Credits/Token 用量仍需
+  接入厂商账号侧用量趋势接口。
+- Mac 端未内置开机自启 LaunchAgent；Windows 可在托盘「桥接服务」里启用当前用户自启。
 - 改**默认**编译进固件的动画（`firmware/include/img/claude_sprite.h` /
   `codex_sprite.h`）仍可用 `tools/convert_sprites.py` 生成新的 `.h` 后 `pio run -t upload`；
   日常换形象用菜单栏 petdex 选择器或设备网页即可，无需烧录。
