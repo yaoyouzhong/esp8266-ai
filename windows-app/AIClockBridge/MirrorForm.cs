@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
+using System.Globalization;
 
 namespace AIClockBridge;
 
@@ -26,12 +27,15 @@ sealed class MirrorControl : Control
     public bool FlashOn;
     public string Line1 = "5h -";
     public string Line2 = "Weekly -";
+    public string Plan = "";
     public bool ShowingClaude = true;
     public bool DeviceOK;
     // net-mode mirror: same scrolling area-chart model as the firmware —
     // one column per 250ms sample, 224-column (56s) window, shared "nice"
     // full-scale, dim-green download area + yellow upload line.
     public bool NetMode;
+    public int NetCPU;
+    public int NetMem;
     public string NetHeaderDL = "0B";
     public string NetHeaderUL = "0B";
     const int NetCols = 224; // NET_CHART_W
@@ -45,6 +49,15 @@ sealed class MirrorControl : Control
     public double MusicDuration;
     public bool MusicPlaying;
     public Bitmap MusicCover;
+
+    public bool DomesticMode;
+    public DomesticStatus Domestic = new();
+    public bool DualMode;
+    public StatusSnapshot Dual = new(new ClaudeStatus(), new CodexStatus(), new DomesticStatus(), 0);
+    public bool StockMode;
+    public StockMonitor.Row[] Stocks = Array.Empty<StockMonitor.Row>();
+    public bool WeatherMode;
+    public WeatherMonitor.Snapshot Weather = new();
 
     static readonly Image ClaudeLogo = LoadAsset("claude-logo.png");
     static readonly Image CodexLogo = LoadAsset("codex-logo.png");
@@ -84,15 +97,8 @@ sealed class MirrorControl : Control
         Invalidate();
     }
 
-    /// Firmware's niceNetScale: shared whole-chart scale snapped to 1/2/5 steps.
-    static double NiceNetScale(double maxV)
-    {
-        double[] steps = { 10_240, 20_480, 51_200, 102_400, 204_800, 512_000,
-                           1_048_576, 2_097_152, 5_242_880, 10_485_760, 20_971_520,
-                           52_428_800, 104_857_600, 209_715_200, 524_288_000 };
-        foreach (var s in steps) if (maxV <= s) return s;
-        return steps[^1];
-    }
+    // Keep the visible peak near 87% of chart height at every traffic level.
+    static double AdaptiveNetScale(double maxV) => Math.Max(10_240, maxV * 8 / 7);
 
     protected override void OnPaint(PaintEventArgs e)
     {
@@ -117,6 +123,26 @@ sealed class MirrorControl : Control
         if (MusicMode)
         {
             DrawMusicScene(g);
+            return;
+        }
+        if (DomesticMode)
+        {
+            DrawDomesticScene(g);
+            return;
+        }
+        if (DualMode)
+        {
+            DrawDualScene(g);
+            return;
+        }
+        if (StockMode)
+        {
+            DrawStockScene(g);
+            return;
+        }
+        if (WeatherMode)
+        {
+            DrawWeatherScene(g);
             return;
         }
 
@@ -153,6 +179,7 @@ sealed class MirrorControl : Control
 
         // app logo, top-left inside the ring (firmware draws it at 14,18 @40px)
         g.DrawImage(ShowingClaude ? ClaudeLogo : CodexLogo, new Rectangle(14, 18, 40, 40));
+        DrawPlanBadge(g);
 
         // quota text
         using (var font = new Font("Consolas", 13, FontStyle.Bold, GraphicsUnit.Pixel))
@@ -179,6 +206,266 @@ sealed class MirrorControl : Control
             g.FillRectangle(red, m, m, t, side);
             g.FillRectangle(red, 240 - m - t, m, t, side);
         }
+    }
+
+    void DrawPlanBadge(Graphics g)
+    {
+        if (string.IsNullOrEmpty(Plan)) return;
+        var color = PlanColor(Plan);
+        using var font = new Font("Consolas", 10, FontStyle.Bold, GraphicsUnit.Pixel);
+        var width = Math.Clamp((int)Math.Ceiling(g.MeasureString(Plan, font).Width) + 12, 34, 100);
+        var rect = new RectangleF(61, 29, width, 18);
+        using var path = RoundedRect(rect, 5);
+        using var fill = new SolidBrush(Color.FromArgb(35, color));
+        using var border = new Pen(color, 1);
+        using var text = new SolidBrush(color);
+        using var fmt = new StringFormat
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+        };
+        g.FillPath(fill, path);
+        g.DrawPath(border, path);
+        g.DrawString(Plan, font, text, rect, fmt);
+    }
+
+    static Color PlanColor(string plan) => plan switch
+    {
+        "PRO" or "PRO LITE" => Color.FromArgb(255, 159, 10),
+        "PLUS" => Color.FromArgb(10, 210, 255),
+        "TEAM" or "BUSINESS" or "ENTERPRISE" => Color.FromArgb(191, 90, 242),
+        "MAX" or "MAX 5X" or "MAX 20X" => Color.FromArgb(255, 125, 45),
+        _ => Color.FromArgb(174, 174, 178),
+    };
+
+    void DrawDomesticScene(Graphics g)
+    {
+        var p = Domestic.Active.Model.Length > 0 || Domestic.Active.PlanPct.HasValue
+            || Domestic.Active.TokensToday > 0
+            ? Domestic.Active
+            : Domestic.ActiveProvider == "xiaomi" ? Domestic.Xiaomi : Domestic.Qwen;
+        var provider = string.IsNullOrEmpty(Domestic.ActiveProvider)
+            ? "QWEN" : Domestic.ActiveProvider.ToUpperInvariant();
+        var plan = p.PlanPct.HasValue ? Math.Clamp((int)p.PlanPct.Value, 0, 100) : 0;
+        var planNumber = p.PlanPct.HasValue
+            ? (p.PlanPctText.Length > 0 ? p.PlanPctText
+                : ((int)Math.Clamp(p.PlanPct.Value, 0, 100)).ToString(CultureInfo.InvariantCulture))
+            : "--";
+        var remaining = p.PlanPct.HasValue
+            ? $"{(p.RemainingPctText.Length > 0 ? p.RemainingPctText
+                : (Math.Truncate(Math.Max(0, 100 - p.PlanPct.Value) * 100) / 100)
+                    .ToString("0.00", CultureInfo.InvariantCulture))}% LEFT"
+            : "QUOTA UNKNOWN";
+        var panelColor = Color.FromArgb(16, 16, 16);
+        var mutedColor = Color.FromArgb(123, 125, 123);
+        var numberColor = Color.FromArgb(255, 251, 222);
+
+        DrawDomesticRing(g, plan);
+
+        using var providerFont = new Font("Consolas", 16, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var modelFont = new Font("Consolas", 12, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var smallFont = new Font("Consolas", 9, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var labelFont = new Font("Consolas", 12, FontStyle.Bold, GraphicsUnit.Pixel);
+        var percentSize = planNumber.Length <= 3 ? 54 : planNumber.Length <= 6 ? 40
+            : planNumber.Length <= 9 ? 30 : 24;
+        using var percentFont = new Font("Consolas", percentSize, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var suffixFont = new Font("Consolas", percentSize <= 30 ? 14 : 22,
+            FontStyle.Bold, GraphicsUnit.Pixel);
+        using var tokenFont = new Font("Consolas", 26, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var greenBrush = new SolidBrush(Green);
+        using var mutedBrush = new SolidBrush(mutedColor);
+        using var numberBrush = new SolidBrush(numberColor);
+        using var cyanBrush = new SolidBrush(Color.Cyan);
+        using var panelBrush = new SolidBrush(panelColor);
+        using var panelPen = new Pen(Color.FromArgb(41, 52, 41));
+        using var centered = new StringFormat
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+            FormatFlags = StringFormatFlags.NoWrap,
+            Trimming = StringTrimming.EllipsisCharacter,
+        };
+
+        g.FillEllipse(greenBrush, 21, 26, 8, 8);
+        g.DrawString(provider, providerFont, greenBrush, 36, 22);
+        using (var right = new StringFormat(centered) { Alignment = StringAlignment.Far })
+            g.DrawString(string.IsNullOrEmpty(p.Model) ? "--" : p.Model, modelFont, Brushes.LightGray,
+                         new RectangleF(106, 20, 112, 22), right);
+        g.FillRectangle(mutedBrush, 20, 53, 200, 1);
+        g.FillRectangle(greenBrush, 20, 53, 42, 1);
+
+        g.DrawString("PLAN", smallFont, mutedBrush, new RectangleF(0, 69, 240, 16), centered);
+        var numberSize = g.MeasureString(planNumber, percentFont);
+        var suffixWidth = p.PlanPct.HasValue ? g.MeasureString("%", suffixFont).Width + 4 : 0;
+        var numberLeft = 120 - (numberSize.Width + suffixWidth) / 2;
+        var numberTop = 90 + (54 - numberSize.Height) / 2;
+        g.DrawString(planNumber, percentFont, numberBrush, numberLeft, numberTop);
+        if (p.PlanPct.HasValue)
+            g.DrawString("%", suffixFont, greenBrush, numberLeft + numberSize.Width + 4,
+                numberTop + numberSize.Height - suffixFont.Height - 1);
+
+        g.DrawString("REMAINING", smallFont, mutedBrush, 37, 153);
+        using (var right = new StringFormat(centered) { Alignment = StringAlignment.Far })
+            g.DrawString(remaining, labelFont, greenBrush, new RectangleF(95, 149, 108, 20), right);
+
+        using (var panel = RoundedRect(new RectangleF(20, 177, 200, 38), 8))
+            g.FillPath(panelBrush, panel);
+        using (var panel = RoundedRect(new RectangleF(20, 177, 200, 38), 8))
+            g.DrawPath(panelPen, panel);
+        g.DrawString("TODAY", labelFont, greenBrush, 34, 182);
+        g.DrawString("TOKENS", smallFont, mutedBrush, 35, 200);
+        using (var right = new StringFormat(centered) { Alignment = StringAlignment.Far })
+            g.DrawString(TokenText(p.TokensToday), tokenFont, cyanBrush,
+                         new RectangleF(104, 179, 99, 32), right);
+    }
+
+    void DrawDualScene(Graphics g)
+    {
+        using var titleFont = new Font("Consolas", 9f, FontStyle.Bold);
+        using var appFont = new Font("Consolas", 10f, FontStyle.Bold);
+        using var labelFont = new Font("Consolas", 7.5f, FontStyle.Bold);
+        using var valueFont = new Font("Consolas", 12f, FontStyle.Bold);
+        using var smallFont = new Font("Consolas", 6.5f);
+        using var muted = new SolidBrush(Color.FromArgb(145, 145, 145));
+        using var center = new StringFormat { Alignment = StringAlignment.Center };
+        using var right = new StringFormat { Alignment = StringAlignment.Far };
+
+        g.DrawString("USAGE OVERVIEW", titleFont, Brushes.White,
+            new RectangleF(0, 8, 240, 18), center);
+        using (var divider = new Pen(Color.FromArgb(45, 45, 45)))
+            g.DrawLine(divider, 18, 121, 222, 121);
+
+        void Section(string name, string plan, string status, double? firstPct, int? firstReset,
+                     double? weeklyPct, int? weeklyReset, float top, bool collapseFirst)
+        {
+            var statusColor = status == "working" ? Green
+                : status == "idle" ? Yellow : Color.FromArgb(90, 90, 90);
+            using var statusBrush = new SolidBrush(statusColor);
+            g.FillEllipse(statusBrush, 18, top + 4, 7, 7);
+            g.DrawString(name, appFont, name == "CLAUDE" ? Brushes.Orange : Brushes.Cyan, 31, top);
+            if (!string.IsNullOrWhiteSpace(plan))
+                g.DrawString(plan, smallFont, muted, new RectangleF(145, top + 2, 76, 14), right);
+
+            void Row(string label, double? pct, int? reset, float y)
+            {
+                g.DrawString(label, labelFont, muted, 20, y + 3);
+                g.DrawString(ResetText(reset), smallFont, muted, 52, y + 5);
+                var value = pct.HasValue ? $"{Math.Round(pct.Value):0}%" : "--";
+                g.DrawString(value, valueFont, Brushes.White, new RectangleF(150, y, 70, 20), right);
+                var bar = new RectangleF(20, y + 23, 200, 6);
+                using var track = new SolidBrush(Color.FromArgb(42, 42, 42));
+                g.FillRectangle(track, bar);
+                if (pct.HasValue)
+                {
+                    var p = Math.Clamp(pct.Value, 0, 100);
+                    var color = p >= 99.5 ? Color.Red : p >= 80 ? Yellow : Green;
+                    using var fill = new SolidBrush(color);
+                    g.FillRectangle(fill, bar.X, bar.Y, bar.Width * (float)(p / 100), bar.Height);
+                }
+            }
+
+            if (collapseFirst) Row("WK", weeklyPct, weeklyReset, top + 35);
+            else
+            {
+                Row("5H", firstPct, firstReset, top + 24);
+                Row("WK", weeklyPct, weeklyReset, top + 57);
+            }
+        }
+
+        Section("CLAUDE", Dual.Claude.Plan, Dual.Claude.Status,
+            Dual.Claude.FiveHourPct, Dual.Claude.FiveHourResetMin,
+            Dual.Claude.SevenDayPct, Dual.Claude.SevenDayResetMin, 31, false);
+        var codexSingle = !Dual.Codex.PrimaryPct.HasValue;
+        Section("CODEX", Dual.Codex.Plan, Dual.Codex.Status,
+            Dual.Codex.PrimaryPct, Dual.Codex.PrimaryResetMin,
+            Dual.Codex.WeeklyPct, Dual.Codex.WeeklyResetMin, 132, codexSingle);
+    }
+
+    static string ResetText(int? minutes)
+    {
+        if (!minutes.HasValue || minutes.Value < 0) return "";
+        var m = minutes.Value;
+        if (m >= 1440) return $"{m / 1440}d{m % 1440 / 60}h";
+        if (m >= 60) return $"{m / 60}h{m % 60}m";
+        return $"{m}m";
+    }
+
+    static void DrawDomesticRing(Graphics g, double pct)
+    {
+        const float margin = 4, thickness = 10, side = 232;
+        var remaining = side * 4 * (float)(Math.Clamp(pct, 0, 100) / 100);
+        using var brush = new SolidBrush(Green);
+        var segment = Math.Min(remaining, side);
+        if (segment > 0) g.FillRectangle(brush, margin, margin, segment, thickness);
+        remaining -= side;
+        segment = Math.Min(Math.Max(remaining, 0), side);
+        if (segment > 0) g.FillRectangle(brush, 226, margin, thickness, segment);
+        remaining -= side;
+        segment = Math.Min(Math.Max(remaining, 0), side);
+        if (segment > 0) g.FillRectangle(brush, 236 - segment, 226, segment, thickness);
+        remaining -= side;
+        segment = Math.Min(Math.Max(remaining, 0), side);
+        if (segment > 0) g.FillRectangle(brush, margin, 236 - segment, thickness, segment);
+    }
+
+    static string PctText(double? pct) => pct.HasValue ? $"{(int)pct.Value}%" : "--";
+
+    static string TokenText(long tokens)
+    {
+        if (tokens >= 1_000_000) return $"{tokens / 1_000_000.0:F1}M";
+        if (tokens >= 1_000) return $"{tokens / 1_000.0:F1}K";
+        return tokens.ToString();
+    }
+
+    void DrawStockScene(Graphics g)
+    {
+        using var codeFont = new Font("Consolas", 12, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var nameFont = new Font("Microsoft YaHei UI", 12, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var valueFont = new Font("Consolas", 24, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var footerFont = new Font("Consolas", 8, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var right = new StringFormat { Alignment = StringAlignment.Far, Trimming = StringTrimming.EllipsisCharacter };
+        for (var i = 0; i < Math.Min(4, Stocks.Length); i++)
+        {
+            var row = Stocks[i];
+            var y = 6 + i * 54;
+            g.DrawString(row.Code, codeFont, Brushes.Gray, 14, y);
+            g.DrawString(row.Name, nameFont, Brushes.LightGray, new RectangleF(70, y, 156, 20), right);
+            g.DrawString(row.Price, valueFont, Brushes.White, 14, y + 20);
+            using var change = new SolidBrush(row.Up > 0 ? Color.Red : row.Up < 0 ? Green : Color.LightGray);
+            g.DrawString(row.Pct, valueFont, change, new RectangleF(130, y + 20, 96, 31), right);
+        }
+        using var centered = new StringFormat { Alignment = StringAlignment.Center };
+        g.DrawString(Stocks.Length == 0 ? "Waiting for bridge..." : "STOCKS", footerFont,
+                     Brushes.Gray, new RectangleF(0, Stocks.Length == 0 ? 104 : 228, 240, 12), centered);
+    }
+
+    void DrawWeatherScene(Graphics g)
+    {
+        var w = Weather;
+        using var headerFont = new Font("Microsoft YaHei UI", 17, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var rangeFont = new Font("Consolas", 14, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var timeFont = new Font("Consolas", 48, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var secondFont = new Font("Consolas", 25, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var dateFont = new Font("Microsoft YaHei UI", 19, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var metricFont = new Font("Consolas", 24, FontStyle.Regular, GraphicsUnit.Pixel);
+        g.DrawString($"{w.City}  {w.Condition}", headerFont, Brushes.White, 14, 1);
+        g.DrawString($"L {(int)Math.Round(w.Low)}C", rangeFont, Brushes.Cyan, 20, 34);
+        g.DrawString($"H {(int)Math.Round(w.High)}C", rangeFont, Brushes.Orange, 81, 34);
+        using (var badgeFont = new Font("Microsoft YaHei UI", w.AirQuality.Length > 1 ? 10 : 14, FontStyle.Bold, GraphicsUnit.Pixel))
+            g.DrawString(w.AirQuality, badgeFont, Brushes.Gold, 136, 15);
+        using (var iconFont = new Font("Segoe UI Symbol", 28, FontStyle.Regular, GraphicsUnit.Pixel))
+            g.DrawString(w.Icon <= 1 ? "☀" : "☁", iconFont, Brushes.Yellow, 190, 18);
+
+        var now = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromSeconds(w.UtcOffsetS));
+        var hm = now.ToString("HHmm");
+        g.DrawString(hm[..2], timeFont, Brushes.White, 17, 54);
+        using var yellowBrush = new SolidBrush(Yellow);
+        g.DrawString(hm[2..], timeFont, yellowBrush, 101, 54);
+        g.DrawString(now.ToString("ss"), secondFont, Brushes.White, 190, 80);
+        var weekdays = "日一二三四五六";
+        g.DrawString($"{now.Month}月{now.Day}日 周{weekdays[(int)now.DayOfWeek]}", dateFont, Brushes.White, 14, 117);
+        g.DrawString($"TEMP   {(int)Math.Round(w.Temperature)}C", metricFont, Brushes.White, 14, 161);
+        g.DrawString($"HUMID  {w.Humidity}%", metricFont, Brushes.White, 14, 198);
     }
 
     void DrawMusicScene(Graphics g)
@@ -246,7 +533,7 @@ sealed class MirrorControl : Control
         }
 
         const float cx = 8, cy = 60, cw = 224, ch = 128;
-        var scale = NiceNetScale(Math.Max(_histRx.Max(), _histTx.Max()));
+        var scale = AdaptiveNetScale(Math.Max(_histRx.Max(), _histTx.Max()));
 
         // quarter gridlines
         using (var grid = new Pen(Color.FromArgb(41, 41, 41), 1))
@@ -304,8 +591,14 @@ sealed class MirrorControl : Control
         }
         using (var center = new StringFormat { Alignment = StringAlignment.Center })
         {
-            g.DrawString("PC NET  -  56s", labelFont, greyBrush,
-                         new RectangleF(0, 206, 240, 12), center);
+            using var sysLabelFont = new Font("Consolas", 7f);
+            using var sysValueFont = new Font("Consolas", 11.5f, FontStyle.Bold);
+            g.DrawString("CPU", sysLabelFont, greyBrush, 28, 196);
+            g.DrawString($"{NetCPU}%", sysValueFont, Brushes.White, 62, 189);
+            g.DrawString("MEM", sysLabelFont, greyBrush, 130, 196);
+            g.DrawString($"{NetMem}%", sysValueFont, Brushes.White, 164, 189);
+            g.DrawString("SYSTEM MONITOR", labelFont, greyBrush,
+                         new RectangleF(0, 212, 240, 12), center);
         }
     }
 
@@ -337,10 +630,12 @@ sealed class MirrorForm : Form
     readonly StatusService _service;
     readonly NetSpeedMonitor _netMonitor;
     readonly NowPlayingMonitor _nowPlaying;
+    readonly StockMonitor _stocks;
+    readonly WeatherMonitor _weather;
     readonly MirrorControl _mirror = new();
     readonly RadioButton[] _modeButtons;
-    static readonly string[] Modes = { "auto", "claude", "codex", "net", "music" };
-    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "网速", "音乐" };
+    static readonly string[] Modes = { "auto", "claude", "codex", "dual", "domestic", "net", "weather", "stock" };
+    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "总览", "国产", "监控", "天气", "股票" };
     readonly Label _statusLabel = new();
     readonly TrackBar _brightness = new() { Minimum = 0, Maximum = 100, TickStyle = TickStyle.None };
     readonly Label _brightnessValue = new();
@@ -361,11 +656,14 @@ sealed class MirrorForm : Form
     string _fetchingSlot;
     bool _applyingMode; // suppress CheckedChanged while reflecting device state
 
-    public MirrorForm(StatusService service, NetSpeedMonitor netMonitor, NowPlayingMonitor nowPlaying)
+    public MirrorForm(StatusService service, NetSpeedMonitor netMonitor, NowPlayingMonitor nowPlaying,
+                      StockMonitor stocks, WeatherMonitor weather)
     {
         _service = service;
         _netMonitor = netMonitor;
         _nowPlaying = nowPlaying;
+        _stocks = stocks;
+        _weather = weather;
 
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
@@ -390,6 +688,7 @@ sealed class MirrorForm : Form
                 TextAlign = ContentAlignment.MiddleCenter,
                 Tag = Modes[i],
                 AutoSize = false,
+                Font = new Font("Microsoft YaHei UI", 7.5f),
             };
             btn.SetBounds(Px(14) + i * segWidth, Px(312), segWidth, Px(28));
             btn.CheckedChanged += ModeChanged;
@@ -515,6 +814,9 @@ sealed class MirrorForm : Form
         var smoothed = _netMonitor.CurrentSmoothed;
         _mirror.NetHeaderDL = MirrorControl.DeviceSpeedText(smoothed.Rx);
         _mirror.NetHeaderUL = MirrorControl.DeviceSpeedText(smoothed.Tx);
+        var stats = SystemStatsMonitor.Snapshot();
+        _mirror.NetCPU = stats.Cpu;
+        _mirror.NetMem = stats.Mem;
         _mirror.PushNetSample(cur.Rx, cur.Tx);
     }
 
@@ -545,8 +847,9 @@ sealed class MirrorForm : Form
         _modeButtons[modeIdx].Checked = true;
         _applyingMode = false;
         var modeText = info.Mode == "auto" ? "自动切换"
-            : info.Mode == "net" ? "网速曲线"
-            : info.Mode == "music" ? "音乐播放" : "固定显示";
+            : info.Mode == "net" ? "系统监控"
+            : info.Mode == "music" ? "音乐播放"
+            : info.Mode == "dual" ? "额度总览" : "固定显示";
         _statusLabel.Text = $"{info.Ip} · {modeText} · 数据 {info.Bridge}";
     }
 
@@ -558,6 +861,10 @@ sealed class MirrorForm : Form
         var enteringNet = info.Effective == "net" && !_mirror.NetMode;
         _mirror.NetMode = info.Effective == "net";
         _mirror.MusicMode = info.Effective == "music";
+        _mirror.DomesticMode = info.Effective == "domestic";
+        _mirror.DualMode = info.Effective == "dual";
+        _mirror.StockMode = info.Effective == "stock";
+        _mirror.WeatherMode = info.Effective == "weather";
         if (_mirror.NetMode)
         {
             if (enteringNet) _mirror.ResetNetSweep(); // fresh sweep, like the device
@@ -578,23 +885,48 @@ sealed class MirrorForm : Form
             _mirror.Invalidate();
             return;
         }
+        if (_mirror.StockMode)
+        {
+            _mirror.Stocks = _stocks.Snapshot;
+            _mirror.Invalidate();
+            return;
+        }
+        if (_mirror.WeatherMode)
+        {
+            _mirror.Weather = _weather.Current;
+            _mirror.Invalidate();
+            return;
+        }
         var snap = _service.Snapshot();
+        if (_mirror.DualMode)
+        {
+            _mirror.Dual = snap;
+            _mirror.Invalidate();
+            return;
+        }
+        if (_mirror.DomesticMode)
+        {
+            _mirror.Domestic = snap.Domestic;
+            _mirror.NeedsInput = snap.Domestic.NeedsInput;
+            _mirror.Invalidate();
+            return;
+        }
         _mirror.ShowingClaude = info.Showing != "codex";
         if (_mirror.ShowingClaude)
         {
-            var pct = snap.Claude.FiveHourPct
-                ?? (snap.Claude.SessionWindowMin > 0
-                    ? 100.0 * snap.Claude.SessionMin / snap.Claude.SessionWindowMin : 0);
+            var pct = snap.Claude.FiveHourPct ?? 0;
             _mirror.RingPct = pct;
             _mirror.Line1 = "5h " + PctText(pct);
             _mirror.Line2 = "Weekly " + PctText(snap.Claude.SevenDayPct);
+            _mirror.Plan = snap.Claude.Plan;
             _mirror.NeedsInput = snap.Claude.NeedsInput;
         }
         else
         {
-            _mirror.RingPct = snap.Codex.PrimaryPct ?? 0;
+            _mirror.RingPct = snap.Codex.PrimaryPct ?? snap.Codex.WeeklyPct ?? 0;
             _mirror.Line1 = "5h " + PctText(snap.Codex.PrimaryPct);
             _mirror.Line2 = "Weekly " + PctText(snap.Codex.WeeklyPct);
+            _mirror.Plan = snap.Codex.Plan;
             _mirror.NeedsInput = snap.Codex.NeedsInput;
         }
         _mirror.Invalidate();
@@ -605,6 +937,7 @@ sealed class MirrorForm : Form
 
     void EnsureSprite(DeviceInfo info)
     {
+        if (info.Effective is "net" or "music" or "dual" or "domestic" or "stock" or "weather") return;
         var slot = info.Showing == "codex" ? "codex" : "claude";
         var w = slot == "claude" ? info.ClaudeW : info.CodexW;
         var h = slot == "claude" ? info.ClaudeH : info.CodexH;
@@ -652,7 +985,7 @@ sealed class MirrorForm : Form
 
     void AnimTick()
     {
-        if (_lastInfo == null || _mirror.NetMode) return;
+        if (_lastInfo == null || _mirror.NetMode || _mirror.MusicMode || _mirror.DualMode || _mirror.StockMode || _mirror.WeatherMode) return;
 
         // ~400ms red-border flash while an approval is pending (device cadence)
         if (_mirror.NeedsInput)
@@ -671,7 +1004,7 @@ sealed class MirrorForm : Form
             _mirror.Invalidate();
         }
 
-        if (_mirror.Frames.Count == 0) return;
+        if (_mirror.DomesticMode || _mirror.Frames.Count == 0) return;
         var snap = _service.Snapshot();
         var working = _lastInfo.Showing == "codex"
             ? snap.Codex.Status == "working" : snap.Claude.Status == "working";

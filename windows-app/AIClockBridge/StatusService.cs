@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Globalization;
 
 namespace AIClockBridge;
 
@@ -11,9 +12,10 @@ namespace AIClockBridge;
 
 class ClaudeStatus
 {
+    public string Plan = "";
     public string Status = "offline";
     public int TokensToday;
-    public int SessionMin;
+    public int SessionMin = 0;
     public int SessionWindowMin = 300;
     public double? FiveHourPct;
     public int? FiveHourResetMin;
@@ -24,6 +26,7 @@ class ClaudeStatus
 
 class CodexStatus
 {
+    public string Plan = "";
     public string Status = "offline";
     public int TokensToday;
     public double? PrimaryPct;
@@ -35,10 +38,35 @@ class CodexStatus
     public bool NeedsInput;
 }
 
+class DomesticProviderStatus
+{
+    public string Model = "";
+    public long TokensToday;
+    public double? PlanPct = null;
+    public string PlanPctText = "";
+    public string RemainingPctText = "";
+    public double? FiveHourPct = null;
+    public double? WeeklyPct = null;
+    public double LastActivityEpoch;
+}
+
+class DomesticStatus
+{
+    public string Status = "offline";
+    public string ActiveProvider = "";
+    public bool NeedsInput;
+    // Generic display payload. New domestic providers populate this field and
+    // ActiveProvider; the firmware never needs a provider-specific layout.
+    public DomesticProviderStatus Active = new();
+    public DomesticProviderStatus Qwen = new();
+    public DomesticProviderStatus Xiaomi = new();
+}
+
 class StatusSnapshot
 {
     public ClaudeStatus Claude = new();
     public CodexStatus Codex = new();
+    public DomesticStatus Domestic = new();
     public long Ts;
     public bool MusicPlaying;
 
@@ -52,6 +80,7 @@ class StatusSnapshot
             w.WriteNumber("ts", Ts);
             w.WriteBoolean("music_playing", MusicPlaying);
             w.WriteStartObject("claude");
+            w.WriteString("plan", Claude.Plan);
             w.WriteString("status", Claude.Status);
             w.WriteNumber("tokens_today", Claude.TokensToday);
             w.WriteNumber("session_min", Claude.SessionMin);
@@ -63,6 +92,7 @@ class StatusSnapshot
             w.WriteBoolean("needs_input", Claude.NeedsInput);
             w.WriteEndObject();
             w.WriteStartObject("codex");
+            w.WriteString("plan", Codex.Plan);
             w.WriteString("status", Codex.Status);
             w.WriteNumber("tokens_today", Codex.TokensToday);
             WriteNullable(w, "primary_pct", Codex.PrimaryPct);
@@ -72,6 +102,14 @@ class StatusSnapshot
             WriteNullable(w, "weekly_window_min", Codex.WeeklyWindowMin);
             WriteNullable(w, "weekly_reset_min", Codex.WeeklyResetMin);
             w.WriteBoolean("needs_input", Codex.NeedsInput);
+            w.WriteEndObject();
+            w.WriteStartObject("domestic");
+            w.WriteString("status", Domestic.Status);
+            w.WriteString("active_provider", Domestic.ActiveProvider);
+            w.WriteBoolean("needs_input", Domestic.NeedsInput);
+            WriteDomesticProvider(w, "active", ActiveDomesticProvider(Domestic));
+            WriteDomesticProvider(w, "qwen", Domestic.Qwen);
+            WriteDomesticProvider(w, "xiaomi", Domestic.Xiaomi);
             w.WriteEndObject();
             w.WriteEndObject();
         }
@@ -88,12 +126,35 @@ class StatusSnapshot
         if (v.HasValue) w.WriteNumber(name, v.Value); else w.WriteNull(name);
     }
 
+    static void WriteDomesticProvider(Utf8JsonWriter w, string name, DomesticProviderStatus p)
+    {
+        w.WriteStartObject(name);
+        w.WriteString("model", p.Model);
+        w.WriteNumber("tokens_today", p.TokensToday);
+        WriteNullable(w, "plan_pct", p.PlanPct);
+        w.WriteString("plan_pct_text", p.PlanPctText);
+        w.WriteString("remaining_pct_text", p.RemainingPctText);
+        WriteNullable(w, "five_hour_pct", p.FiveHourPct);
+        WriteNullable(w, "weekly_pct", p.WeeklyPct);
+        w.WriteEndObject();
+    }
+
+    static DomesticProviderStatus ActiveDomesticProvider(DomesticStatus domestic)
+    {
+        if (domestic.Active.Model.Length > 0 || domestic.Active.TokensToday > 0
+            || domestic.Active.PlanPct.HasValue || domestic.Active.FiveHourPct.HasValue
+            || domestic.Active.WeeklyPct.HasValue)
+            return domestic.Active;
+        return domestic.ActiveProvider == "xiaomi" ? domestic.Xiaomi : domestic.Qwen;
+    }
+
     StatusSnapshot() { }
 
-    public StatusSnapshot(ClaudeStatus claude, CodexStatus codex, long ts)
+    public StatusSnapshot(ClaudeStatus claude, CodexStatus codex, DomesticStatus domestic, long ts)
     {
         Claude = claude;
         Codex = codex;
+        Domestic = domestic;
         Ts = ts;
     }
 
@@ -103,6 +164,15 @@ class StatusSnapshot
         {
             Claude = (ClaudeStatus)Claude.MemberwiseCloneOf(),
             Codex = (CodexStatus)Codex.MemberwiseCloneOf(),
+            Domestic = new DomesticStatus
+            {
+                Status = Domestic.Status,
+                ActiveProvider = Domestic.ActiveProvider,
+                NeedsInput = Domestic.NeedsInput,
+                Active = (DomesticProviderStatus)Domestic.Active.MemberwiseCloneOf(),
+                Qwen = (DomesticProviderStatus)Domestic.Qwen.MemberwiseCloneOf(),
+                Xiaomi = (DomesticProviderStatus)Domestic.Xiaomi.MemberwiseCloneOf(),
+            },
             Ts = Ts,
             MusicPlaying = MusicPlaying,
         };
@@ -132,6 +202,7 @@ sealed class StatusService
     /// Real OAuth quota (5h/weekly windows) merged into snapshots when set;
     /// log-derived values remain the fallback for offline use.
     public UsageFetcher Usage;
+    public DomesticQuotaService DomesticUsage;
 
     /// Whether audio is playing right now (drives the device's AUTO -> music
     /// auto-switch). Set from NowPlayingMonitor in Program.
@@ -230,7 +301,30 @@ sealed class StatusService
     StatusSnapshot _cached;
     double _cachedAt;
 
+    sealed record ClaudeFileSummary(
+        long ClaudeTokens, double ClaudeActivity,
+        long QwenTokens, string QwenModel, double QwenActivity,
+        long XiaomiTokens, string XiaomiModel, double XiaomiActivity);
+
+    // Claude Code JSONL files are append-only. Reuse the parsed aggregate until
+    // the file mtime changes instead of rereading the full history every 5s.
+    readonly Dictionary<string, (double Mtime, ClaudeFileSummary Summary)> _claudeFileCache = new();
+
     static double Now() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+
+    static void SetPercentDisplayText(DomesticProviderStatus provider)
+    {
+        if (!provider.PlanPct.HasValue)
+        {
+            provider.PlanPctText = "";
+            provider.RemainingPctText = "";
+            return;
+        }
+        provider.PlanPctText = ((int)Math.Clamp(provider.PlanPct.Value, 0, 100))
+            .ToString(CultureInfo.InvariantCulture);
+        var remaining = Math.Truncate(Math.Max(0, 100 - provider.PlanPct.Value) * 100) / 100;
+        provider.RemainingPctText = remaining.ToString("0.00", CultureInfo.InvariantCulture);
+    }
 
     public StatusSnapshot Snapshot()
     {
@@ -244,7 +338,8 @@ sealed class StatusService
             }
             else
             {
-                snap = new StatusSnapshot(ReadClaude(), ReadCodex(), (long)now);
+                var claude = ReadClaude(out var domestic);
+                snap = new StatusSnapshot(claude, ReadCodex(), domestic, (long)now);
                 _cached = snap.Clone();
                 _cachedAt = now;
             }
@@ -255,11 +350,13 @@ sealed class StatusService
             if (Usage != null)
             {
                 var cu = Usage.Claude;
+                snap.Claude.Plan = cu.Plan ?? "";
                 snap.Claude.FiveHourPct = cu.PrimaryPct;
                 snap.Claude.FiveHourResetMin = cu.PrimaryResetMin;
                 snap.Claude.SevenDayPct = cu.WeeklyPct;
                 snap.Claude.SevenDayResetMin = cu.WeeklyResetMin;
                 var xu = Usage.Codex;
+                snap.Codex.Plan = xu.Plan ?? "";
                 if (xu.PrimaryPct.HasValue)
                 {
                     snap.Codex.PrimaryPct = xu.PrimaryPct;
@@ -271,9 +368,28 @@ sealed class StatusService
                     snap.Codex.WeeklyResetMin = xu.WeeklyResetMin;
                 }
             }
-            snap.Claude.Status = OverrideStatus(snap.Claude.Status, _claudeEvent, now);
+            if (DomesticUsage != null)
+            {
+                var du = DomesticUsage.Snapshot;
+                snap.Domestic.Qwen.PlanPct = du.QwenPlanPct;
+                snap.Domestic.Xiaomi.PlanPct = du.XiaomiPlanPct;
+                SetPercentDisplayText(snap.Domestic.Qwen);
+                SetPercentDisplayText(snap.Domestic.Xiaomi);
+            }
+            var domesticIsCurrent = snap.Domestic.ActiveProvider.Length > 0
+                && Math.Max(snap.Domestic.Qwen.LastActivityEpoch,
+                            snap.Domestic.Xiaomi.LastActivityEpoch) > now - IdleThreshold;
+            if (domesticIsCurrent)
+            {
+                snap.Domestic.Status = OverrideStatus(snap.Domestic.Status, _claudeEvent, now);
+                snap.Domestic.NeedsInput = NeedsInput(_claudeNeedsInputAt, now);
+            }
+            else
+            {
+                snap.Claude.Status = OverrideStatus(snap.Claude.Status, _claudeEvent, now);
+                snap.Claude.NeedsInput = NeedsInput(_claudeNeedsInputAt, now);
+            }
             snap.Codex.Status = OverrideStatus(snap.Codex.Status, _codexEvent, now);
-            snap.Claude.NeedsInput = NeedsInput(_claudeNeedsInputAt, now);
             snap.Codex.NeedsInput = NeedsInput(_codexNeedsInputAt, now);
             snap.MusicPlaying = MusicPlayingProvider?.Invoke() ?? false;
             return snap;
@@ -348,16 +464,26 @@ sealed class StatusService
 
     // MARK: - Claude
 
-    ClaudeStatus ReadClaude()
+    static string ModelProvider(string model)
+    {
+        var m = model?.Trim().ToLowerInvariant() ?? "";
+        if (m.StartsWith("claude-") || m.Contains("/claude-")) return "claude";
+        if (m.StartsWith("qwen") || m.Contains("/qwen")) return "qwen";
+        if (m.StartsWith("mimo") || m.Contains("/mimo") || m.Contains("xiaomi")) return "xiaomi";
+        return "";
+    }
+
+    ClaudeStatus ReadClaude(out DomesticStatus domestic)
     {
         var todayStart = TodayStartEpoch();
         var now = Now();
-        var tokensToday = 0;
-        double lastMtime = 0;
-        double? firstActiveInWindow = null;
+        var claude = new ClaudeStatus();
+        domestic = new DomesticStatus();
+        double lastClaudeActivity = 0;
 
         if (Directory.Exists(_claudeDir))
         {
+            var livePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             IEnumerable<string> files;
             try
             {
@@ -379,39 +505,92 @@ sealed class StatusService
                 {
                     continue;
                 }
-                if (mtime > lastMtime) lastMtime = mtime;
                 if (mtime < todayStart) continue; // no activity today, skip parsing
-                var lines = ReadLines(file);
-                if (lines == null) continue;
-                foreach (var line in lines)
+                livePaths.Add(file);
+                if (!_claudeFileCache.TryGetValue(file, out var cached) || cached.Mtime != mtime)
                 {
-                    if (!line.Contains("\"usage\":{")) continue;
-                    JsonDocument doc;
-                    try { doc = JsonDocument.Parse(line); } catch { continue; }
-                    using (doc)
-                    {
-                        var root = doc.RootElement;
-                        if (!TryProp(root, "message", out var message)
-                            || !TryProp(message, "usage", out var usage)) continue;
-                        var entryEpoch = ParseIso(StringVal(root, "timestamp"));
-                        if (entryEpoch.HasValue && entryEpoch.Value < todayStart) continue;
-                        tokensToday += IntVal(usage, "input_tokens") + IntVal(usage, "output_tokens")
-                            + IntVal(usage, "cache_creation_input_tokens")
-                            + IntVal(usage, "cache_read_input_tokens");
-                        if (entryEpoch.HasValue && now - entryEpoch.Value < 5 * 3600)
-                        {
-                            if (!firstActiveInWindow.HasValue || entryEpoch.Value < firstActiveInWindow.Value)
-                                firstActiveInWindow = entryEpoch.Value;
-                        }
-                    }
+                    var lines = ReadLines(file);
+                    if (lines == null) continue; // transient lock: retry next scan
+                    cached = (mtime, ParseClaudeFile(lines, todayStart, mtime));
+                    _claudeFileCache[file] = cached;
+                }
+                var summary = cached.Summary;
+                claude.TokensToday = (int)Math.Min(int.MaxValue,
+                    (long)claude.TokensToday + summary.ClaudeTokens);
+                lastClaudeActivity = Math.Max(lastClaudeActivity, summary.ClaudeActivity);
+                MergeDomesticFile(domestic.Qwen, summary.QwenTokens,
+                    summary.QwenModel, summary.QwenActivity);
+                MergeDomesticFile(domestic.Xiaomi, summary.XiaomiTokens,
+                    summary.XiaomiModel, summary.XiaomiActivity);
+            }
+
+            var stale = _claudeFileCache.Keys.Where(path => !livePaths.Contains(path)).ToArray();
+            foreach (var path in stale) _claudeFileCache.Remove(path);
+        }
+
+        claude.Status = StatusFromDelta(lastClaudeActivity > 0 ? now - lastClaudeActivity : 1e9);
+        var qwenAt = domestic.Qwen.LastActivityEpoch;
+        var xiaomiAt = domestic.Xiaomi.LastActivityEpoch;
+        var latestDomestic = Math.Max(qwenAt, xiaomiAt);
+        domestic.ActiveProvider = latestDomestic <= 0 ? "" : qwenAt >= xiaomiAt ? "qwen" : "xiaomi";
+        domestic.Status = StatusFromDelta(latestDomestic > 0 ? now - latestDomestic : 1e9);
+        return claude;
+    }
+
+    static void MergeDomesticFile(DomesticProviderStatus target, long tokens,
+                                  string model, double activity)
+    {
+        target.TokensToday += tokens;
+        if (activity >= target.LastActivityEpoch)
+        {
+            target.LastActivityEpoch = activity;
+            target.Model = model;
+        }
+    }
+
+    static ClaudeFileSummary ParseClaudeFile(string[] lines, double todayStart, double mtime)
+    {
+        long claudeTokens = 0, qwenTokens = 0, xiaomiTokens = 0;
+        double claudeAt = 0, qwenAt = 0, xiaomiAt = 0;
+        string qwenModel = "", xiaomiModel = "";
+        foreach (var line in lines)
+        {
+            if (!line.Contains("\"usage\":{")) continue;
+            JsonDocument doc;
+            try { doc = JsonDocument.Parse(line); } catch { continue; }
+            using (doc)
+            {
+                var root = doc.RootElement;
+                if (!TryProp(root, "message", out var message)
+                    || !TryProp(message, "usage", out var usage)) continue;
+                var entryEpoch = ParseIso(StringVal(root, "timestamp"));
+                if (entryEpoch.HasValue && entryEpoch.Value < todayStart) continue;
+                var model = StringVal(message, "model") ?? "";
+                var provider = ModelProvider(model);
+                if (provider.Length == 0) continue;
+                var tokens = (long)IntVal(usage, "input_tokens") + IntVal(usage, "output_tokens")
+                    + IntVal(usage, "cache_creation_input_tokens")
+                    + IntVal(usage, "cache_read_input_tokens");
+                var activity = entryEpoch ?? mtime;
+                if (provider == "claude")
+                {
+                    claudeTokens += tokens;
+                    claudeAt = Math.Max(claudeAt, activity);
+                }
+                else if (provider == "qwen")
+                {
+                    qwenTokens += tokens;
+                    if (activity >= qwenAt) { qwenAt = activity; qwenModel = model; }
+                }
+                else
+                {
+                    xiaomiTokens += tokens;
+                    if (activity >= xiaomiAt) { xiaomiAt = activity; xiaomiModel = model; }
                 }
             }
         }
-
-        var s = new ClaudeStatus { TokensToday = tokensToday };
-        if (firstActiveInWindow.HasValue) s.SessionMin = (int)((now - firstActiveInWindow.Value) / 60);
-        s.Status = StatusFromDelta(lastMtime > 0 ? now - lastMtime : 1e9);
-        return s;
+        return new ClaudeFileSummary(claudeTokens, claudeAt,
+            qwenTokens, qwenModel, qwenAt, xiaomiTokens, xiaomiModel, xiaomiAt);
     }
 
     // MARK: - Codex
@@ -497,21 +676,33 @@ sealed class StatusService
         {
             var rl = latestRateLimits.Value;
             if (TryProp(rl, "primary", out var primary))
-            {
-                s.PrimaryPct = DoubleVal(primary, "used_percent");
-                s.PrimaryWindowMin = (int?)DoubleVal(primary, "window_minutes");
-                var reset = DoubleVal(primary, "resets_at");
-                if (reset.HasValue) s.PrimaryResetMin = Math.Max(0, (int)((reset.Value - now) / 60));
-            }
+                AssignCodexWindow(s, primary, now, false);
             if (TryProp(rl, "secondary", out var secondary))
-            {
-                s.WeeklyPct = DoubleVal(secondary, "used_percent");
-                s.WeeklyWindowMin = (int?)DoubleVal(secondary, "window_minutes");
-                var reset = DoubleVal(secondary, "resets_at");
-                if (reset.HasValue) s.WeeklyResetMin = Math.Max(0, (int)((reset.Value - now) / 60));
-            }
+                AssignCodexWindow(s, secondary, now, true);
         }
         latestRateLimitsDoc?.Dispose();
         return s;
+    }
+
+    static void AssignCodexWindow(CodexStatus status, JsonElement window,
+                                  double now, bool weeklyFallback)
+    {
+        var minutes = DoubleVal(window, "window_minutes");
+        var weekly = minutes.HasValue ? minutes.Value >= 2 * 24 * 60 : weeklyFallback;
+        var pct = DoubleVal(window, "used_percent");
+        var reset = DoubleVal(window, "resets_at");
+        var resetMin = reset.HasValue ? Math.Max(0, (int)((reset.Value - now) / 60)) : (int?)null;
+        if (weekly)
+        {
+            status.WeeklyPct = pct;
+            status.WeeklyWindowMin = (int?)minutes;
+            status.WeeklyResetMin = resetMin;
+        }
+        else
+        {
+            status.PrimaryPct = pct;
+            status.PrimaryWindowMin = (int?)minutes;
+            status.PrimaryResetMin = resetMin;
+        }
     }
 }

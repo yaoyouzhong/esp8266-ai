@@ -9,9 +9,29 @@ namespace AIClockBridge;
 // itself.
 sealed class TrayAppContext : ApplicationContext
 {
+    const string CycleEnabledKey = "display_cycle_enabled";
+    const string CyclePagesKey = "display_cycle_pages";
+    const string CycleIntervalKey = "display_cycle_interval_seconds";
+    static readonly (string Title, string Mode)[] DisplayModes =
+    {
+        ("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
+        ("固定 Codex", "codex"), ("额度总览", "dual"), ("国产模型", "domestic"),
+        ("系统监控", "net"), ("音乐播放", "music"), ("股票行情", "stock"),
+        ("天气时钟", "weather"),
+    };
+    static readonly (string Title, string Mode)[] CycleModes =
+    {
+        ("额度总览", "dual"), ("Codex", "codex"), ("Claude", "claude"), ("天气时钟", "weather"),
+        ("股票行情", "stock"), ("国产模型", "domestic"), ("音乐播放", "music"),
+        ("系统监控", "net"),
+    };
+
     readonly NotifyIcon _trayIcon;
     readonly StatusService _service;
     readonly UsageFetcher _usage;
+    readonly DomesticQuotaService _domesticUsage;
+    readonly StockMonitor _stocks;
+    readonly WeatherMonitor _weather;
     readonly int _port;
     readonly MirrorForm _mirror;
     readonly ContextMenuStrip _menu = new();
@@ -19,15 +39,32 @@ sealed class TrayAppContext : ApplicationContext
     readonly ToolStripMenuItem _claudeUsageItem = new("Claude …") { Enabled = false };
     readonly ToolStripMenuItem _codexUsageItem = new("Codex …") { Enabled = false };
     readonly ToolStripMenuItem _deviceInfoItem = new("设备：未设置") { Enabled = false };
+    readonly ToolStripMenuItem _startupItem = new("随 Windows 启动") { CheckOnClick = false };
     readonly Dictionary<string, ToolStripMenuItem> _modeItems = new();
+    readonly ToolStripMenuItem _cycleEnabledItem = new("启用循环展示");
+    readonly Dictionary<string, ToolStripMenuItem> _cyclePageItems = new();
+    readonly Dictionary<int, ToolStripMenuItem> _cycleIntervalItems = new();
+    readonly System.Windows.Forms.Timer _cycleTimer = new();
+    bool _cycleEnabled;
+    bool _cycleBusy;
+    bool _keepMenuOpen;
+    int _cycleIntervalSeconds;
+    int _cycleIndex = -1;
 
-    public TrayAppContext(StatusService service, UsageFetcher usage, NetSpeedMonitor netMonitor,
-                          NowPlayingMonitor nowPlaying, int port)
+    public TrayAppContext(StatusService service, UsageFetcher usage, DomesticQuotaService domesticUsage,
+                          NetSpeedMonitor netMonitor,
+                          NowPlayingMonitor nowPlaying, StockMonitor stocks, WeatherMonitor weather, int port)
     {
         _service = service;
         _usage = usage;
+        _domesticUsage = domesticUsage;
+        _stocks = stocks;
+        _weather = weather;
         _port = port;
-        _mirror = new MirrorForm(service, netMonitor, nowPlaying);
+        _mirror = new MirrorForm(service, netMonitor, nowPlaying, stocks, weather);
+
+        LoadCycleSettings();
+        _cycleTimer.Tick += async (_, _) => await AdvanceCycle();
 
         BuildMenu();
         _trayIcon = new NotifyIcon
@@ -43,11 +80,17 @@ sealed class TrayAppContext : ApplicationContext
         };
         _menu.Opening += (_, _) =>
         {
+            _startupItem.Checked = StartupManager.IsEnabled;
             _usage.Refresh();
             RefreshUsageLines();
             _ = RefreshDeviceSection();
         };
         _usage.OnUpdate = RefreshUsageLines;
+        if (_cycleEnabled)
+        {
+            _cycleTimer.Start();
+            _ = AdvanceCycle();
+        }
     }
 
     /// User-supplied device logo (bezel + dark screen + smiley + green status
@@ -66,21 +109,27 @@ sealed class TrayAppContext : ApplicationContext
 
     void BuildMenu()
     {
-        _menu.Items.Add(_claudeUsageItem);
-        _menu.Items.Add(_codexUsageItem);
-        _menu.Items.Add(new ToolStripSeparator());
+        var quotaMenu = new ToolStripMenuItem("模型额度");
+        quotaMenu.DropDownItems.Add(_claudeUsageItem);
+        quotaMenu.DropDownItems.Add(_codexUsageItem);
+        quotaMenu.DropDownItems.Add(new ToolStripSeparator());
+        var domesticAuthorization = new ToolStripMenuItem("国产模型额度授权…");
+        domesticAuthorization.Click += (_, _) =>
+            _menu.BeginInvoke(_domesticUsage.OpenAuthorization);
+        quotaMenu.DropDownItems.Add(domesticAuthorization);
+        _menu.Items.Add(quotaMenu);
 
-        _menu.Items.Add(_deviceInfoItem);
-        _menu.Items.Add(MakeItem("自动查找并配对设备", async (_, _) => await AutoPairAction()));
-        _menu.Items.Add(MakeItem("设置设备地址…", (_, _) => SetDeviceAddress()));
-        _menu.Items.Add(MakeItem("打开设备网页", (_, _) => OpenDevicePage()));
+        var deviceMenu = new ToolStripMenuItem("设备连接");
+        deviceMenu.DropDownItems.Add(_deviceInfoItem);
+        deviceMenu.DropDownItems.Add(new ToolStripSeparator());
+        deviceMenu.DropDownItems.Add(MakeItem("自动查找并配对", async (_, _) => await AutoPairAction()));
+        deviceMenu.DropDownItems.Add(MakeItem("设置设备地址…", (_, _) => SetDeviceAddress()));
+        deviceMenu.DropDownItems.Add(MakeItem("打开设备网页", (_, _) => OpenDevicePage()));
+        deviceMenu.DropDownItems.Add(MakeItem("将本机设为桥接", async (_, _) => await PointBridgeHere()));
+        _menu.Items.Add(deviceMenu);
 
-        var displayMenu = new ToolStripMenuItem("屏幕显示");
-        foreach (var (title, mode) in new[]
-        {
-            ("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
-            ("固定 Codex", "codex"), ("网速曲线", "net"), ("音乐播放", "music"),
-        })
+        var displayMenu = new ToolStripMenuItem("显示模式");
+        foreach (var (title, mode) in DisplayModes)
         {
             var item = new ToolStripMenuItem(title);
             item.Click += async (_, _) => await SetDisplayMode(mode);
@@ -88,10 +137,80 @@ sealed class TrayAppContext : ApplicationContext
             displayMenu.DropDownItems.Add(item);
         }
         _menu.Items.Add(displayMenu);
-        // (屏幕亮度在左键弹出的镜像页底部，做成滑条了)
 
-        _menu.Items.Add(MakeItem("更换桌宠动画…（petdex）", (_, _) => OpenPetPicker()));
+        var cycleMenu = new ToolStripMenuItem("循环展示");
+        _cycleEnabledItem.Click += async (_, _) => await SetCycleEnabled(!_cycleEnabled, restoreAuto: true);
+        KeepOpenOnClick(_cycleEnabledItem);
+        cycleMenu.DropDownItems.Add(_cycleEnabledItem);
+        var cyclePagesMenu = new ToolStripMenuItem("循环页面");
+        foreach (var (title, mode) in CycleModes)
+        {
+            var item = new ToolStripMenuItem(title) { CheckOnClick = true, Checked = CyclePages().Contains(mode) };
+            item.CheckedChanged += (_, _) => SaveCyclePages();
+            KeepOpenOnClick(item);
+            _cyclePageItems[mode] = item;
+            cyclePagesMenu.DropDownItems.Add(item);
+        }
+        cycleMenu.DropDownItems.Add(cyclePagesMenu);
+        var intervalMenu = new ToolStripMenuItem("切换间隔");
+        foreach (var seconds in new[] { 10, 15, 30, 60 })
+        {
+            var item = new ToolStripMenuItem($"每 {seconds} 秒") { Checked = seconds == _cycleIntervalSeconds };
+            item.Click += (_, _) => SetCycleInterval(seconds);
+            KeepOpenOnClick(item);
+            _cycleIntervalItems[seconds] = item;
+            intervalMenu.DropDownItems.Add(item);
+        }
+        cycleMenu.DropDownItems.Add(intervalMenu);
+        KeepOpenWhileSetting(_menu);
+        KeepOpenWhileSetting(cycleMenu.DropDown);
+        KeepOpenWhileSetting(cyclePagesMenu.DropDown);
+        KeepOpenWhileSetting(intervalMenu.DropDown);
+        _menu.Items.Add(cycleMenu);
+        UpdateCycleMenu();
 
+        var contentMenu = new ToolStripMenuItem("内容设置");
+        contentMenu.DropDownItems.Add(MakeItem("设置自选股…", (_, _) =>
+        {
+            var input = InputDialog.Show("自选股",
+                "逗号分隔：sh/sz/bj=A股、hk=港股、us=美股；屏幕最多显示 4 只。\n例如 sh600519,hk00700,usAAPL",
+                string.Join(",", StockMonitor.Symbols), "sh000001,usAAPL");
+            if (input == null) return;
+            StockMonitor.Symbols = input.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            _stocks.Refresh();
+        }));
+        var weatherMenu = new ToolStripMenuItem("天气设置");
+        weatherMenu.DropDownItems.Add(MakeItem("设置天气城市…", (_, _) =>
+        {
+            var input = InputDialog.Show("天气城市", "输入城市名，例如 上海、北京、济南。保存后立即刷新天气。",
+                WeatherMonitor.City, "上海");
+            if (input != null) _weather.SetCity(input);
+        }));
+        var weatherAnimationMenu = new ToolStripMenuItem("右下角动画");
+        foreach (var (title, animation) in new[]
+        {
+            ("天气机器人", "robot"), ("像素天气小屋", "house"),
+            ("像素盆栽", "plant"), ("天气萌宠", "pet"), ("关闭动画", "off"),
+        })
+        {
+            var item = new ToolStripMenuItem(title) { Checked = WeatherMonitor.Animation == animation };
+            item.Click += (_, _) =>
+            {
+                WeatherMonitor.Animation = animation;
+                foreach (ToolStripMenuItem peer in weatherAnimationMenu.DropDownItems) peer.Checked = peer == item;
+                DeviceClient.PushWeatherSettings();
+            };
+            KeepOpenOnClick(item);
+            weatherAnimationMenu.DropDownItems.Add(item);
+        }
+        weatherMenu.DropDownItems.Add(weatherAnimationMenu);
+        KeepOpenWhileSetting(weatherMenu.DropDown);
+        KeepOpenWhileSetting(weatherAnimationMenu.DropDown);
+        contentMenu.DropDownItems.Add(weatherMenu);
+        _menu.Items.Add(contentMenu);
+
+        var appearanceMenu = new ToolStripMenuItem("桌宠与外观");
+        appearanceMenu.DropDownItems.Add(MakeItem("更换桌宠动画…（petdex）", (_, _) => OpenPetPicker()));
         var resetMenu = new ToolStripMenuItem("恢复默认动画");
         foreach (var (title, slot) in new[] { ("Claude 恢复默认", "claude"), ("Codex 恢复默认", "codex") })
         {
@@ -99,17 +218,22 @@ sealed class TrayAppContext : ApplicationContext
             item.Click += async (_, _) => await ResetSprite(slot);
             resetMenu.DropDownItems.Add(item);
         }
-        _menu.Items.Add(resetMenu);
+        appearanceMenu.DropDownItems.Add(resetMenu);
+        _menu.Items.Add(appearanceMenu);
 
-        _menu.Items.Add(MakeItem("把本机设为设备桥接", async (_, _) => await PointBridgeHere()));
-        _menu.Items.Add(new ToolStripSeparator());
-        _menu.Items.Add(MakeItem("刷新", (_, _) =>
+        var serviceMenu = new ToolStripMenuItem("桥接服务");
+        serviceMenu.DropDownItems.Add(MakeItem("刷新状态", (_, _) =>
         {
             _usage.Refresh();
             RefreshUsageLines();
             _ = RefreshDeviceSection();
         }));
-        _menu.Items.Add(MakeItem("桥接服务地址", (_, _) => ShowAddress()));
+        serviceMenu.DropDownItems.Add(MakeItem("桥接服务地址", (_, _) => ShowAddress()));
+        serviceMenu.DropDownItems.Add(new ToolStripSeparator());
+        _startupItem.Click += (_, _) => ToggleStartup();
+        serviceMenu.DropDownItems.Add(_startupItem);
+        _menu.Items.Add(serviceMenu);
+
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(MakeItem("退出", (_, _) =>
         {
@@ -125,6 +249,121 @@ sealed class TrayAppContext : ApplicationContext
         return item;
     }
 
+    void KeepOpenOnClick(ToolStripMenuItem item)
+    {
+        item.MouseDown += (_, _) => _keepMenuOpen = true;
+        item.Click += (_, _) => BeginInvoke(() => _keepMenuOpen = false);
+    }
+
+    void KeepOpenWhileSetting(ToolStripDropDown menu)
+    {
+        menu.Closing += (_, e) =>
+        {
+            if (_keepMenuOpen && e.CloseReason == ToolStripDropDownCloseReason.ItemClicked)
+                e.Cancel = true;
+        };
+    }
+
+    void BeginInvoke(Action action)
+    {
+        if (_menu.IsHandleCreated) _menu.BeginInvoke(action);
+        else action();
+    }
+
+    void LoadCycleSettings()
+    {
+        _cycleEnabled = Settings.Get(CycleEnabledKey) == "1";
+        _cycleIntervalSeconds = int.TryParse(Settings.Get(CycleIntervalKey), out var seconds)
+            && new[] { 10, 15, 30, 60 }.Contains(seconds) ? seconds : 15;
+        _cycleTimer.Interval = _cycleIntervalSeconds * 1000;
+    }
+
+    List<string> CyclePages()
+    {
+        if (_cyclePageItems.Count == CycleModes.Length)
+            return CycleModes.Where(x => _cyclePageItems[x.Mode].Checked).Select(x => x.Mode).ToList();
+        return Settings.Get(CyclePagesKey).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+    }
+
+    void SaveCyclePages()
+    {
+        Settings.Set(CyclePagesKey, string.Join(",", CyclePages()));
+        if (_cycleEnabled && CyclePages().Count == 0) _ = SetCycleEnabled(false, restoreAuto: true);
+    }
+
+    void EnsureDefaultCyclePages()
+    {
+        foreach (var mode in new[] { "codex", "claude", "weather", "stock" })
+            _cyclePageItems[mode].Checked = true;
+        SaveCyclePages();
+    }
+
+    void UpdateCycleMenu()
+    {
+        _cycleEnabledItem.Checked = _cycleEnabled;
+        _cycleEnabledItem.Text = _cycleEnabled
+            ? $"循环展示：已开启（每 {_cycleIntervalSeconds} 秒）"
+            : "启用循环展示";
+        foreach (var (seconds, item) in _cycleIntervalItems) item.Checked = seconds == _cycleIntervalSeconds;
+    }
+
+    void SetCycleInterval(int seconds)
+    {
+        _cycleIntervalSeconds = seconds;
+        _cycleTimer.Interval = seconds * 1000;
+        Settings.Set(CycleIntervalKey, seconds.ToString());
+        UpdateCycleMenu();
+    }
+
+    async Task SetCycleEnabled(bool enabled, bool restoreAuto)
+    {
+        if (enabled && CyclePages().Count == 0) EnsureDefaultCyclePages();
+        _cycleEnabled = enabled;
+        Settings.Set(CycleEnabledKey, enabled ? "1" : "0");
+        UpdateCycleMenu();
+        if (enabled)
+        {
+            _cycleIndex = -1;
+            _cycleTimer.Start();
+            await AdvanceCycle();
+            return;
+        }
+
+        _cycleTimer.Stop();
+        if (!restoreAuto) return;
+        try
+        {
+            await DeviceClient.SetDisplayMode("auto");
+            await RefreshDeviceSection();
+        }
+        catch (Exception e)
+        {
+            Toast("停止循环失败", e.Message);
+        }
+    }
+
+    async Task AdvanceCycle()
+    {
+        if (!_cycleEnabled || _cycleBusy) return;
+        var pages = CyclePages();
+        if (pages.Count == 0) return;
+        _cycleBusy = true;
+        try
+        {
+            _cycleIndex = (_cycleIndex + 1) % pages.Count;
+            await DeviceClient.SetDisplayMode(pages[_cycleIndex]);
+            await RefreshDeviceSection();
+        }
+        catch (Exception e)
+        {
+            _deviceInfoItem.Text = $"循环展示：切换失败（{e.Message}）";
+        }
+        finally
+        {
+            _cycleBusy = false;
+        }
+    }
+
     // MARK: - refresh
 
     void RefreshUsageLines()
@@ -135,7 +374,8 @@ sealed class TrayAppContext : ApplicationContext
 
     static string UsageLine(string name, ProviderUsage u, string weeklyLabel)
     {
-        if (u.Error != null && u.PrimaryPct == null) return $"{name}：{u.Error}";
+        if (u.Error != null && u.PrimaryPct == null && u.WeeklyPct == null)
+            return $"{name}：{u.Error}";
         var parts = new List<string>();
         if (u.PrimaryPct.HasValue)
         {
@@ -162,13 +402,16 @@ sealed class TrayAppContext : ApplicationContext
     async Task RefreshDeviceSection()
     {
         var host = DeviceClient.Host;
-        if (host.Length == 0)
+        var usb = DeviceClient.Usb;
+        if (host.Length == 0 && usb?.Connected != true)
         {
             _deviceInfoItem.Text = "设备：未设置地址";
             foreach (var item in _modeItems.Values) item.Checked = false;
             return;
         }
-        _deviceInfoItem.Text = $"设备：{host}（连接中…）";
+        _deviceInfoItem.Text = usb?.Connected == true
+            ? $"设备：USB {usb.PortName}（连接中…）"
+            : $"设备：{host}（连接中…）";
         DeviceInfo info;
         try
         {
@@ -176,7 +419,9 @@ sealed class TrayAppContext : ApplicationContext
         }
         catch (Exception)
         {
-            _deviceInfoItem.Text = $"设备：{host}（无法连接）";
+            _deviceInfoItem.Text = usb?.Connected == true
+                ? $"设备：USB {usb.PortName}（无法读取）"
+                : $"设备：{host}（无法连接）";
             foreach (var item in _modeItems.Values) item.Checked = false;
             // self-heal: the device may have moved to a new DHCP address;
             // if it recently polled us from a different IP, adopt that.
@@ -193,11 +438,15 @@ sealed class TrayAppContext : ApplicationContext
             info.ClaudeCustomSprite ? "C:自定义" : "C:默认",
             info.CodexCustomSprite ? "X:自定义" : "X:默认",
         };
-        var showing = info.Mode == "net" ? "网速"
+        var showing = info.Mode == "net" ? "系统监控"
             : info.Mode == "music" ? "音乐"
+            : info.Mode == "domestic" ? "国产模型"
+            : info.Mode == "stock" ? "股票"
+            : info.Mode == "weather" ? "天气"
             : (info.Showing == "claude" ? "Claude" : "Codex");
+        var connection = usb?.Connected == true ? $"USB {usb.PortName}" : info.Ip;
         _deviceInfoItem.Text =
-            $"设备：{info.Ip} · 正在显示 {showing} · {string.Join(" ", sprites)}";
+            $"设备：{connection} · 正在显示 {showing} · {string.Join(" ", sprites)}";
         foreach (var (mode, item) in _modeItems) item.Checked = mode == info.Mode;
     }
 
@@ -250,6 +499,7 @@ sealed class TrayAppContext : ApplicationContext
     {
         try
         {
+            if (_cycleEnabled) await SetCycleEnabled(false, restoreAuto: false);
             await DeviceClient.SetDisplayMode(mode);
             await RefreshDeviceSection();
         }
@@ -303,6 +553,23 @@ sealed class TrayAppContext : ApplicationContext
         var ip = DeviceClient.LocalIPv4() ?? "<本机局域网IP>";
         Toast("桥接服务地址",
               $"http://{ip}:{_port}/status\n\n设备端 Bridge host 填：{ip}:{_port}");
+    }
+
+    void ToggleStartup()
+    {
+        try
+        {
+            var enable = !StartupManager.IsEnabled;
+            StartupManager.SetEnabled(enable);
+            _startupItem.Checked = enable;
+            Toast(enable ? "已开启" : "已关闭",
+                  enable ? "AI Clock Bridge 将在登录 Windows 后自动启动。"
+                         : "AI Clock Bridge 已取消随 Windows 启动。");
+        }
+        catch (Exception e)
+        {
+            Toast("设置失败", e.Message);
+        }
     }
 
     static void Toast(string title, string text)

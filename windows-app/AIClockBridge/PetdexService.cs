@@ -40,25 +40,34 @@ static class PetdexService
         new("review", "思考 Review", 8, 6, 1030),
     };
 
-    static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(60) };
+    static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(90) };
+    static readonly HttpClient DirectHttp = new(new SocketsHttpHandler { UseProxy = false })
+    {
+        Timeout = TimeSpan.FromSeconds(90),
+    };
+    static readonly string ManifestCachePath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "AIClockBridge", "petdex-v1.json");
     static List<PetdexPet> _cachedPets;
 
     public static async Task<List<PetdexPet>> LoadManifest()
     {
         if (_cachedPets != null) return _cachedPets;
-        string body;
+        byte[] data;
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            body = await Http.GetStringAsync(ManifestUrl, cts.Token);
+            data = await DownloadBytes(ManifestUrl);
+            Directory.CreateDirectory(Path.GetDirectoryName(ManifestCachePath)!);
+            await File.WriteAllBytesAsync(ManifestCachePath, data);
         }
         catch (Exception e)
         {
-            throw new DeviceException($"petdex manifest 下载失败：{e.Message}");
+            try { data = await File.ReadAllBytesAsync(ManifestCachePath); }
+            catch { throw new DeviceException($"petdex manifest 下载失败：{e.Message}"); }
         }
         try
         {
-            using var doc = JsonDocument.Parse(body);
+            using var doc = JsonDocument.Parse(data);
             var pets = new List<PetdexPet>();
             foreach (var item in doc.RootElement.GetProperty("pets").EnumerateArray())
             {
@@ -85,7 +94,7 @@ static class PetdexService
         byte[] data;
         try
         {
-            data = await Http.GetByteArrayAsync(pet.SpritesheetUrl);
+            data = await DownloadBytes(pet.SpritesheetUrl);
         }
         catch (Exception e)
         {
@@ -99,6 +108,30 @@ static class PetdexService
         {
             throw new DeviceException("spritesheet 解码失败（WebP）");
         }
+    }
+
+    static async Task<byte[]> DownloadBytes(string url)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        var pending = new List<Task<byte[]>>
+        {
+            Http.GetByteArrayAsync(url, cts.Token),
+            DirectHttp.GetByteArrayAsync(url, cts.Token),
+        };
+        Exception lastError = null;
+        while (pending.Count > 0)
+        {
+            var completed = await Task.WhenAny(pending);
+            pending.Remove(completed);
+            try
+            {
+                var result = await completed;
+                cts.Cancel();
+                return result;
+            }
+            catch (Exception e) { lastError = e; }
+        }
+        throw lastError ?? new HttpRequestException("下载失败");
     }
 
     /// Crops `state`'s row out of the sheet and encodes a looping GIF at

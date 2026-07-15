@@ -20,6 +20,13 @@
 ST7789 彩屏上。桌宠动画（GIF）的上传和解码**全部在 ESP8266 板子上完成**，换形象不再需要
 电脑参与（详见第 4 节）。
 
+Windows 版另有 USB 优先传输，CH340 串口为 460800：小型控制帧以 `@AICLOCK ` 开头，
+后接单行 JSON（协议 `version=1`）；图片/GIF/动画使用 `NUL + COBS + NUL` 二进制分块，
+含传输 ID、序号、长度、逐块 CRC32/ACK 和整包 CRC32。两者与普通固件日志共用串口。
+USB 覆盖状态、网速、完整音乐画面、天气、股票、设备控制、GIF 上传和镜像精灵读取；连续 8 秒未收到
+USB 心跳时固件自动回退 HTTP。图片在设备端边收边画，GIF 边收边写 LittleFS，均不缓存
+整个文件到 ESP8266 RAM。
+
 ## 目录结构
 
 ```
@@ -56,7 +63,7 @@ swift run                # 前台运行；或 swift build 后跑 .build/debug/AI
   也会自愈。菜单项走完整流程：最近来访 IP → 已配置地址复验 → 子网 /24 扫描兜底
   （覆盖"刚配完 WiFi、还没设过桥接"的全新设备）。
 - **设置设备地址…**：手动填时钟的 IP（开机时屏幕会显示；有自动配对后基本用不上）
-- **屏幕显示**：自动（谁在干活显示谁）/ 固定 Claude / 固定 Codex
+- **屏幕显示**：自动（谁在干活显示谁）/ 固定 Claude / 固定 Codex / 额度总览 / 国产模型 / 系统监控 / 音乐 / 股票 / 天气
 - **音乐播放**：显示 Mac 当前播放的专辑封面、歌曲、歌手和进度
 - **更换桌宠动画…**：内置 [petdex.dev](https://petdex.dev) 画廊（3300+ 开源桌宠），
   搜索 → 选动画（待机/跑步/挥手…9 种）→ 预览 → 一键上传到设备
@@ -133,27 +140,26 @@ pio run -t upload          # 已验证：编译成功，Flash 45.7%，RAM 39.7%
 烧录后串口会打印调试日志（这版固件不再是"静默"的）：
 
 ```
-[wifi] starting WiFiManager autoConnect...
-*wm:AutoConnect
-*wm:No wifi saved, skipping
-*wm:StartAP with SSID:  AI-Clock-Setup
-*wm:AP IP address: 192.168.4.1
+[wifi] connecting in background...
+[wifi] bridge host = '192.168.1.23:8765'
+[wifi] no USB or WiFi; starting non-blocking config portal
 ```
 
-首次开机（或 WiFi 配置丢失时）会开一个热点 `AI-Clock-Setup`，手机连上后自动弹出配置页
-（或手动访问 `192.168.4.1`），选择你的 WiFi，并在 "Bridge host (ip:port)" 里填这台 Mac
-的局域网 IP，例如 `192.168.1.23:8765`。保存后设备会记住配置（存在 LittleFS 里），下次
-开机自动连线。
+固件先启动显示与 USB 协议，WiFi 在主循环中连接和重试，不会阻塞 USB。连续 15 秒既没有
+USB 桥接也没有连上 WiFi 时，才会开启热点 `AI-Clock-Setup`；手机连上后自动弹出配置页
+（或手动访问 `192.168.4.1`）并选择 WiFi。保存后 WiFiManager 会记住配置，下次开机在后台
+自动连接；连接成功后才启动设备管理 Web 服务。
 
 查看串口日志：
 
 ```bash
-pio device monitor -b 115200
+pio device monitor -b 460800
 ```
 
 ## 3. 屏幕布局
 
-全屏单应用视图（不显示时钟），一次只显示 Claude 或 Codex 其中一个，规则：
+主视图不显示时钟：Claude/Codex 使用桌宠视图，国产模型使用千问 + 小米 MiMo 聚合页。
+桌宠视图一次只显示 Claude 或 Codex 其中一个，规则：
 
 - **只有一方在工作** → 固定显示正在工作的那个
 - **两方都在工作** → 每 2 秒交替
@@ -164,8 +170,9 @@ pio device monitor -b 115200
 
 - 屏幕中央：对应角色的大幅像素动画（Claude = 跑步的 Dario，Codex = 戴耳机的宠物），
   仅在该角色 `working` 时播放动画，否则停在静止帧。
-- 屏幕四周一圈方形进度环：环的填充长度 = 用量百分比（Claude 用 5 小时滚动窗口已用
-  比例近似，Codex 用真实的 5h `primary_pct`）；环的颜色/动画参考
+- 屏幕四周一圈方形进度环：环的填充长度 = 供应商返回的真实用量百分比（Claude 用真实
+  5h 值；未知时为 0 且文字显示 `-`，不再用会话时长近似；Codex 优先真实 5h，5h
+  不存在时使用真实周额度）；环的颜色/动画参考
   [vibecoding-signal-light](https://github.com/starlight36/vibecoding-signal-light)
   的红绿灯设计：
   - **常亮绿** = 空闲/离线，不需要关注
@@ -197,7 +204,7 @@ pio device monitor -b 115200
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/info` | 设备状态 JSON：ip/ssid/bridge/显示模式/当前显示/自定义精灵标记 |
-| POST | `/api/display` | `mode=auto\|claude\|codex\|net\|music` 切换屏幕显示（net=网速曲线页，music=音乐播放页）|
+| POST | `/api/display` | `mode=auto\|claude\|codex\|domestic\|net\|music\|stock\|weather` 切换屏幕显示 |
 | POST | `/api/bridge` | `host=ip:port` 设置桥接地址 |
 | POST | `/sprite/claude`、`/sprite/codex` | multipart 上传 GIF 并板上解码替换 |
 | POST | `/sprite/claude/reset`、`/sprite/codex/reset` | 删除自定义动画，恢复内置形象 |
@@ -205,18 +212,20 @@ pio device monitor -b 115200
 
 `/api/info` 里的 `sprite_rev` 在每次上传/重置动画后自增，镜像端据此决定是否重新拉帧。
 
-## 5. 网速曲线页（Mac + 设备同步显示）
+## 5. 系统监控页（桥接程序 + 设备同步显示）
 
 Mac app 每 250ms（4Hz）读一次内核的网卡字节计数（getifaddrs/AF_LINK，只统计物理
 `en*` 网卡，避免 VPN/utun 重复计数），保留 3 分钟历史。
 
-显示模式切到「网速曲线」后，设备端**渲染与网络完全解耦**：`GET /net` 返回带全局
-序号（seq）的最近 12 个 250ms 样本，设备每 2 秒拉一次补进队列（按 seq 去重），
+显示模式切到「系统监控」后，设备端**渲染与网络完全解耦**：`GET /net` 返回带全局
+序号（seq）的最近 12 个 250ms 样本；Windows 桥接同时附带 CPU 与物理内存使用率。
+设备每 2 秒拉一次数据补进队列（按 seq 去重），
 渲染以固定 250ms/列的节奏消费队列，HTTP 延迟不会体现在画面上。
 
 界面是任务管理器风格的**滚动填充面积图**（224 列 x 128px，56 秒窗口，最新在右）：
-下载 = 暗绿填充 + 亮绿顶边，上传 = 2px 黄线，背景 25/50/75% 暗格线；整图共享一个
-1/2/5 阶梯的"整数量程"（10K/20K/50K/…），高度全图可比，量程标签显示在图外右上。
+下载 = 暗绿填充 + 亮绿顶边，上传 = 黄线，背景 25/50/75% 暗格线；整图共享按窗口峰值
+自适应的量程，使峰值保持在约 87% 高度，量程标签显示在图外右上。设备端采用 5px 曲线，
+兼顾小屏可读性与交叉曲线辨识度。
 每帧从 224 个样本的数据环逐行合成像素、每行一次 `pushImage` 整行写屏——没有
 "先清屏再画"的过程，所以完全无闪烁。顶部大号 DL/UL 读数取 1 秒平均，只在数值
 变化时局部重绘。Mac 弹窗镜像用同一套数据模型和布局同步渲染。
@@ -264,15 +273,16 @@ Mac 端常驻进程由 LaunchAgent（`~/Library/LaunchAgents/local.AIClockBridge
 
 ### GIF 上传架构
 
-架构：GIF 通过 `ESP8266WebServer` 的 multipart 文件上传（`HTTPUpload` 回调）边收边流式
-写进 LittleFS 的临时文件（`/c.gif` / `/x.gif`），然后固件用
+架构：GIF 可通过 `ESP8266WebServer` multipart（`HTTPUpload` 回调）或 USB COBS 分块
+上传，两条路径都边收边写进 LittleFS 临时文件（`/c.gif` / `/x.gif`）。USB 路径先校验
+逐块 CRC、总长度和整包 CRC，然后固件用
 [AnimatedGIF](https://github.com/bitbank2/AnimatedGIF) 库**逐行解码**成设备要的 RGB565
 帧，写入 `/c.bin` / `/x.bin`（格式 `[1字节帧数][各帧像素...]`），最后删掉临时 GIF。
 
 ESP8266 总共只有 ~80KB RAM，一帧 120x120 的 RGB565 就 ~28KB，AnimatedGIF 自己也要
 ~24KB，两个大缓冲塞不下，所以整条链路都是**逐行流式、不常驻整帧**：
 
-- 上传：multipart 分块写文件，不把整个 body 攒进一个 `String`（那样体积必炸内存）。
+- 上传：HTTP multipart 或 USB COBS 分块写文件，不把整个 body 攒进 RAM。
 - 解码：AnimatedGIF 逐行回调，只用两条「一行」缓冲把源行最近邻缩放到目标尺寸，直接
   逐行写进 `.bin`；不覆盖到的区域用**上一帧**补齐（读回刚写进 `.bin` 的上一帧），
   这样被优化器裁成小矩形的 GIF（disposal method 1）也能拼对。解码期间才在堆上

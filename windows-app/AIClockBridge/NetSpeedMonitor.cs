@@ -75,10 +75,13 @@ sealed class NetSpeedMonitor
             tail = _samples.Skip(skip).ToArray();
         }
         var smoothed = CurrentSmoothed;
+        var stats = SystemStatsMonitor.Snapshot();
         return JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, object>
         {
             ["rx_bps"] = (long)smoothed.Rx,
             ["tx_bps"] = (long)smoothed.Tx,
+            ["cpu_pct"] = stats.Cpu,
+            ["mem_pct"] = stats.Mem,
             ["seq"] = seq,
             ["interval_ms"] = (int)(SampleInterval * 1000),
             ["rx"] = tail.Select(s => (long)s.Rx).ToArray(),

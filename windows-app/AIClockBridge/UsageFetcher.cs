@@ -13,6 +13,7 @@ namespace AIClockBridge;
 
 class ProviderUsage
 {
+    public string Plan;            // normalized display label; empty = unknown
     public double? PrimaryPct;     // 5h window used %
     public int? PrimaryResetMin;   // minutes until it resets
     public double? WeeklyPct;      // 7d / weekly window used %
@@ -25,6 +26,10 @@ class ProviderUsage
 sealed class UsageFetcher
 {
     static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
+    static readonly string CachePath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "AIClockBridge", "usage-cache.json");
+    static readonly JsonSerializerOptions CacheJson = new() { IncludeFields = true };
 
     readonly object _lock = new();
     ProviderUsage _claude = new();
@@ -35,6 +40,11 @@ sealed class UsageFetcher
 
     static readonly TimeSpan MinFetchInterval = TimeSpan.FromSeconds(60);
     static readonly TimeSpan RateLimitBackoff = TimeSpan.FromSeconds(300);
+
+    public UsageFetcher()
+    {
+        (_claude, _codex) = LoadCache();
+    }
 
     public ProviderUsage Claude { get { lock (_lock) return _claude; } }
     public ProviderUsage Codex { get { lock (_lock) return _codex; } }
@@ -71,6 +81,7 @@ sealed class UsageFetcher
                 // error (network hiccup / 429) - stale quota beats no quota.
                 _claude = Merge(_claude, claude);
                 _codex = Merge(_codex, codex);
+                if (HasQuota(claude) || HasQuota(codex)) SaveCache(_claude, _codex);
                 _fetching = false;
                 var backoff = claude.RateLimited ? RateLimitBackoff : MinFetchInterval;
                 _nextAllowedFetch = DateTime.UtcNow + backoff;
@@ -84,10 +95,12 @@ sealed class UsageFetcher
 
     static ProviderUsage Merge(ProviderUsage old, ProviderUsage fresh)
     {
-        if (fresh.PrimaryPct == null && fresh.WeeklyPct == null && old.PrimaryPct != null)
+        if (string.IsNullOrEmpty(fresh.Plan)) fresh.Plan = old.Plan;
+        if (!HasQuota(fresh) && HasQuota(old))
         {
             return new ProviderUsage
             {
+                Plan = fresh.Plan,
                 PrimaryPct = old.PrimaryPct,
                 PrimaryResetMin = old.PrimaryResetMin,
                 WeeklyPct = old.WeeklyPct,
@@ -99,20 +112,94 @@ sealed class UsageFetcher
         return fresh;
     }
 
+    static bool HasQuota(ProviderUsage usage) =>
+        usage?.PrimaryPct != null || usage?.WeeklyPct != null;
+
+    sealed class UsageCache
+    {
+        public ProviderUsage Claude = new();
+        public ProviderUsage Codex = new();
+    }
+
+    static (ProviderUsage Claude, ProviderUsage Codex) LoadCache()
+    {
+        try
+        {
+            var cache = JsonSerializer.Deserialize<UsageCache>(
+                File.ReadAllText(CachePath), CacheJson);
+            if (cache != null)
+                return (RestoreCached(cache.Claude), RestoreCached(cache.Codex));
+        }
+        catch
+        {
+            // Missing or damaged cache: the normal online refresh will replace it.
+        }
+        return (new ProviderUsage(), new ProviderUsage());
+    }
+
+    static ProviderUsage RestoreCached(ProviderUsage usage)
+    {
+        if (usage == null) return new ProviderUsage();
+        usage.Error = null;
+        usage.RateLimited = false;
+        if (usage.FetchedAt.HasValue)
+        {
+            var ageMin = Math.Max(0, (int)(DateTime.UtcNow - usage.FetchedAt.Value).TotalMinutes);
+            usage.PrimaryResetMin = AdjustCachedReset(usage.PrimaryResetMin, ageMin);
+            usage.WeeklyResetMin = AdjustCachedReset(usage.WeeklyResetMin, ageMin);
+        }
+        return usage;
+    }
+
+    static int? AdjustCachedReset(int? resetMin, int ageMin)
+    {
+        if (!resetMin.HasValue) return null;
+        return resetMin.Value > ageMin ? resetMin.Value - ageMin : null;
+    }
+
+    static void SaveCache(ProviderUsage claude, ProviderUsage codex)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(CachePath)!);
+            File.WriteAllText(CachePath,
+                JsonSerializer.Serialize(new UsageCache
+                {
+                    Claude = CacheCopy(claude),
+                    Codex = CacheCopy(codex),
+                }, CacheJson));
+        }
+        catch
+        {
+            // Cache is best-effort; live usage remains available in memory.
+        }
+    }
+
+    static ProviderUsage CacheCopy(ProviderUsage usage) => new()
+    {
+        Plan = usage.Plan,
+        PrimaryPct = usage.PrimaryPct,
+        PrimaryResetMin = usage.PrimaryResetMin,
+        WeeklyPct = usage.WeeklyPct,
+        WeeklyResetMin = usage.WeeklyResetMin,
+        FetchedAt = usage.FetchedAt,
+    };
+
     // MARK: - Claude (api.anthropic.com/api/oauth/usage)
 
     static async Task<ProviderUsage> FetchClaude()
     {
         var usage = new ProviderUsage();
-        var token = ClaudeAccessToken();
-        if (token == null)
+        var creds = ClaudeCredentials();
+        if (creds == null)
         {
             usage.Error = "未找到 Claude Code 登录凭据（~/.claude/.credentials.json）";
             return usage;
         }
+        usage.Plan = creds.Value.Plan;
         using var req = new HttpRequestMessage(HttpMethod.Get,
             "https://api.anthropic.com/api/oauth/usage");
-        req.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+        req.Headers.TryAddWithoutValidation("Authorization", $"Bearer {creds.Value.AccessToken}");
         req.Headers.TryAddWithoutValidation("Accept", "application/json");
         req.Headers.TryAddWithoutValidation("anthropic-beta", "oauth-2025-04-20");
         req.Headers.TryAddWithoutValidation("User-Agent", "claude-code/2.1.0");
@@ -142,6 +229,9 @@ sealed class UsageFetcher
         {
             using var doc = JsonDocument.Parse(body);
             var now = DateTimeOffset.UtcNow;
+            usage.Plan = PlanLabel(StringOrNull(doc.RootElement, "plan_type"))
+                ?? PlanLabel(StringOrNull(doc.RootElement, "subscription_type"))
+                ?? usage.Plan;
             if (doc.RootElement.TryGetProperty("five_hour", out var fiveHour))
             {
                 usage.PrimaryPct = NumberOrNull(fiveHour, "utilization");
@@ -163,7 +253,7 @@ sealed class UsageFetcher
 
     /// Claude Code on Windows stores OAuth credentials as a plain JSON file:
     /// {"claudeAiOauth":{"accessToken":…}}
-    static string ClaudeAccessToken()
+    static (string AccessToken, string Plan)? ClaudeCredentials()
     {
         var credFile = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -176,7 +266,10 @@ sealed class UsageFetcher
                 && token.ValueKind == JsonValueKind.String)
             {
                 var t = token.GetString();
-                return string.IsNullOrEmpty(t) ? null : t;
+                if (string.IsNullOrEmpty(t)) return null;
+                var plan = PlanLabel(StringOrNull(oauth, "subscriptionType"))
+                    ?? PlanLabel(StringOrNull(oauth, "subscription_type"));
+                return (t, plan);
             }
         }
         catch
@@ -197,6 +290,7 @@ sealed class UsageFetcher
             usage.Error = "未找到 Codex 登录凭据 (~/.codex/auth.json)";
             return usage;
         }
+        usage.Plan = creds.Value.Plan;
         using var req = new HttpRequestMessage(HttpMethod.Get,
             "https://chatgpt.com/backend-api/wham/usage");
         req.Headers.TryAddWithoutValidation("Authorization", $"Bearer {creds.Value.AccessToken}");
@@ -227,6 +321,7 @@ sealed class UsageFetcher
         try
         {
             using var doc = JsonDocument.Parse(body);
+            usage.Plan = PlanLabel(StringOrNull(doc.RootElement, "plan_type")) ?? usage.Plan;
             if (!doc.RootElement.TryGetProperty("rate_limit", out var rateLimit))
             {
                 usage.Error = "Codex 用量响应解析失败";
@@ -234,17 +329,9 @@ sealed class UsageFetcher
             }
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
             if (rateLimit.TryGetProperty("primary_window", out var w1))
-            {
-                usage.PrimaryPct = NumberOrNull(w1, "used_percent");
-                var reset = NumberOrNull(w1, "reset_at");
-                if (reset.HasValue) usage.PrimaryResetMin = Math.Max(0, (int)((reset.Value - now) / 60));
-            }
+                AssignCodexWindow(usage, w1, now, false);
             if (rateLimit.TryGetProperty("secondary_window", out var w2))
-            {
-                usage.WeeklyPct = NumberOrNull(w2, "used_percent");
-                var reset = NumberOrNull(w2, "reset_at");
-                if (reset.HasValue) usage.WeeklyResetMin = Math.Max(0, (int)((reset.Value - now) / 60));
-            }
+                AssignCodexWindow(usage, w2, now, true);
             usage.FetchedAt = DateTime.UtcNow;
         }
         catch
@@ -254,7 +341,30 @@ sealed class UsageFetcher
         return usage;
     }
 
-    static (string AccessToken, string AccountId)? CodexCredentials()
+    static void AssignCodexWindow(ProviderUsage usage, JsonElement window,
+                                  double now, bool weeklyFallback)
+    {
+        if (window.ValueKind != JsonValueKind.Object) return;
+        var seconds = NumberOrNull(window, "limit_window_seconds");
+        // OpenAI may place the only active window in primary_window. Identify
+        // it by its duration: 5h = 18,000s, weekly = 604,800s.
+        var weekly = seconds.HasValue ? seconds.Value >= 2 * 24 * 60 * 60 : weeklyFallback;
+        var pct = NumberOrNull(window, "used_percent");
+        var reset = NumberOrNull(window, "reset_at");
+        var resetMin = reset.HasValue ? Math.Max(0, (int)((reset.Value - now) / 60)) : (int?)null;
+        if (weekly)
+        {
+            usage.WeeklyPct = pct;
+            usage.WeeklyResetMin = resetMin;
+        }
+        else
+        {
+            usage.PrimaryPct = pct;
+            usage.PrimaryResetMin = resetMin;
+        }
+    }
+
+    static (string AccessToken, string AccountId, string Plan)? CodexCredentials()
     {
         var path = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "auth.json");
@@ -267,12 +377,16 @@ sealed class UsageFetcher
             var access = accessEl.GetString();
             if (string.IsNullOrEmpty(access)) return null;
             string accountId = null;
+            string plan = null;
             if (tokens.TryGetProperty("account_id", out var acc) && acc.ValueKind == JsonValueKind.String)
                 accountId = acc.GetString();
-            if (accountId == null && tokens.TryGetProperty("id_token", out var idTok)
+            if (tokens.TryGetProperty("id_token", out var idTok)
                 && idTok.ValueKind == JsonValueKind.String)
-                accountId = AccountIdFromJwt(idTok.GetString());
-            return (access, accountId);
+            {
+                accountId ??= AccountIdFromJwt(idTok.GetString());
+                plan = PlanFromJwt(idTok.GetString());
+            }
+            return (access, accountId, plan);
         }
         catch
         {
@@ -303,6 +417,25 @@ sealed class UsageFetcher
         return null;
     }
 
+    static string PlanFromJwt(string jwt)
+    {
+        var parts = jwt.Split('.');
+        if (parts.Length < 2) return null;
+        var b64 = parts[1].Replace('-', '+').Replace('_', '/');
+        while (b64.Length % 4 != 0) b64 += "=";
+        try
+        {
+            using var doc = JsonDocument.Parse(Convert.FromBase64String(b64));
+            if (doc.RootElement.TryGetProperty("https://api.openai.com/auth", out var auth))
+                return PlanLabel(StringOrNull(auth, "chatgpt_plan_type"));
+        }
+        catch
+        {
+            // malformed JWT
+        }
+        return null;
+    }
+
     // MARK: - helpers
 
     static double? NumberOrNull(JsonElement obj, string key)
@@ -319,6 +452,27 @@ sealed class UsageFetcher
             && v.ValueKind == JsonValueKind.String)
             return v.GetString();
         return null;
+    }
+
+    /// Only known, explicit vendor values are displayed. Unknown values stay
+    /// hidden instead of being guessed from usage limits.
+    static string PlanLabel(string value)
+    {
+        return value?.Trim().ToLowerInvariant() switch
+        {
+            "free" => "FREE",
+            "plus" => "PLUS",
+            "pro" => "PRO",
+            "prolite" or "pro_lite" or "pro-lite" => "PRO LITE",
+            "team" => "TEAM",
+            "business" => "BUSINESS",
+            "enterprise" => "ENTERPRISE",
+            "edu" => "EDU",
+            "max" => "MAX",
+            "max_5x" or "max-5x" => "MAX 5X",
+            "max_20x" or "max-20x" => "MAX 20X",
+            _ => null,
+        };
     }
 
     static int? MinutesUntil(string iso, DateTimeOffset now)

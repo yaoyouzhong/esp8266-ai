@@ -8,6 +8,73 @@ namespace AIClockBridge;
 // the mirror's sprite/cover decoders.
 static class Rgb565
 {
+    // Packet format: bit7=repeat, low7=count-1. Repeat packets carry one
+    // RGB565 pixel; literal packets carry count pixels. This is deliberately
+    // tiny enough to decode row-by-row on the ESP8266.
+    public static byte[] Compress(byte[] raw)
+    {
+        if (raw == null || raw.Length % 2 != 0) return Array.Empty<byte>();
+        using var output = new MemoryStream(raw.Length);
+        var pixels = raw.Length / 2;
+        var index = 0;
+        while (index < pixels)
+        {
+            var run = 1;
+            while (run < 128 && index + run < pixels
+                && raw[index * 2] == raw[(index + run) * 2]
+                && raw[index * 2 + 1] == raw[(index + run) * 2 + 1]) run++;
+            if (run >= 3)
+            {
+                output.WriteByte((byte)(0x80 | (run - 1)));
+                output.Write(raw, index * 2, 2);
+                index += run;
+                continue;
+            }
+
+            var literalStart = index;
+            index += run;
+            while (index < pixels && index - literalStart < 128)
+            {
+                run = 1;
+                while (run < 3 && index + run < pixels
+                    && raw[index * 2] == raw[(index + run) * 2]
+                    && raw[index * 2 + 1] == raw[(index + run) * 2 + 1]) run++;
+                if (run >= 3) break;
+                index += Math.Min(run, 128 - (index - literalStart));
+            }
+            var count = index - literalStart;
+            output.WriteByte((byte)(count - 1));
+            output.Write(raw, literalStart * 2, count * 2);
+        }
+        return output.ToArray();
+    }
+
+    public static byte[] Decompress(byte[] packed, int expectedBytes)
+    {
+        var output = new byte[expectedBytes];
+        var source = 0;
+        var target = 0;
+        while (source < packed.Length && target < output.Length)
+        {
+            var header = packed[source++];
+            var count = (header & 0x7f) + 1;
+            if ((header & 0x80) != 0)
+            {
+                if (source + 2 > packed.Length || target + count * 2 > output.Length) return Array.Empty<byte>();
+                var hi = packed[source++]; var lo = packed[source++];
+                for (var i = 0; i < count; i++) { output[target++] = hi; output[target++] = lo; }
+            }
+            else
+            {
+                var bytes = count * 2;
+                if (source + bytes > packed.Length || target + bytes > output.Length) return Array.Empty<byte>();
+                Buffer.BlockCopy(packed, source, output, target, bytes);
+                source += bytes; target += bytes;
+            }
+        }
+        return source == packed.Length && target == output.Length ? output : Array.Empty<byte>();
+    }
+
     /// 32bppArgb bitmap -> big-endian RGB565 bytes, row-major.
     public static byte[] Encode(Bitmap bmp)
     {

@@ -15,14 +15,18 @@ class DeviceInfo
     public string Ip = "";
     public string Ssid = "";
     public string Bridge = "";
-    public string Mode = "auto";       // configured: auto | claude | codex | net | music
-    public string Effective = "auto";  // what's actually on screen (AUTO may promote to music)
+    public string Mode = "auto";       // configured: auto | claude | codex | dual | domestic | net | music | stock | weather
+    public string Effective = "auto";  // AUTO may promote to domestic or music
     public string Showing = "";
     public int LastUpdateS = -1;       // seconds since the device last got /status data, -1 = never
     public int SpriteRev;              // bumped by the device on animation change
     public int Brightness = 100;       // backlight 0-100 (0 = off)
     public bool ClaudeCustomSprite;
     public bool CodexCustomSprite;
+    public bool StockUiCached;
+    public bool WeatherUiCached;
+    public uint StockUiCacheCrc;
+    public uint WeatherUiCacheCrc;
     public int ClaudeW = 111, ClaudeH = 120;
     public int CodexW = 120, CodexH = 120;
 }
@@ -41,6 +45,7 @@ static class DeviceClient
     // posts, 30s sprite pull, 60s GIF upload+on-device decode), so the client
     // itself must not impose a shorter global one
     static readonly HttpClient Http = new() { Timeout = Timeout.InfiniteTimeSpan };
+    public static SerialBridge Usb { get; set; }
 
     public static string Host
     {
@@ -75,6 +80,11 @@ static class DeviceClient
     /// GET /api/info
     public static async Task<DeviceInfo> FetchInfo()
     {
+        if (Usb?.Connected == true)
+        {
+            Usb.RequestInfo();
+            if (Usb.DeviceInfo is { } usbInfo) return usbInfo;
+        }
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         string body;
         try
@@ -114,6 +124,13 @@ static class DeviceClient
                 info.CodexW = Int(codex, "w", 120);
                 info.CodexH = Int(codex, "h", 120);
             }
+            if (root.TryGetProperty("ui_cache", out var cache))
+            {
+                info.StockUiCached = Bool(cache, "stock");
+                info.WeatherUiCached = Bool(cache, "weather");
+                info.StockUiCacheCrc = UInt(cache, "stock_crc");
+                info.WeatherUiCacheCrc = UInt(cache, "weather_crc");
+            }
             return info;
         }
         catch (Exception)
@@ -123,21 +140,39 @@ static class DeviceClient
     }
 
     /// POST /api/display  mode=auto|claude|codex|net|music
-    public static Task SetDisplayMode(string mode) =>
-        PostForm("api/display", new() { ["mode"] = mode });
+    public static Task SetDisplayMode(string mode)
+    {
+        if (Usb?.Connected == true) { Usb.SetDisplayMode(mode); return Task.CompletedTask; }
+        return PostForm("api/display", new() { ["mode"] = mode });
+    }
 
     /// POST /api/bridge  host=ip:port
     public static Task SetBridgeHost(string bridgeHost) =>
         PostForm("api/bridge", new() { ["host"] = bridgeHost });
 
     /// POST /api/brightness  level=0-100 (0 = backlight off); device persists it
-    public static Task SetBrightness(int level) =>
-        PostForm("api/brightness", new() { ["level"] = level.ToString() });
+    public static Task SetBrightness(int level)
+    {
+        if (Usb?.Connected == true) { Usb.SetBrightness(level); return Task.CompletedTask; }
+        return PostForm("api/brightness", new() { ["level"] = level.ToString() });
+    }
+
+    // LAN devices pull the updated weather JSON on their next poll. USB can
+    // apply the animation choice immediately without changing display mode.
+    public static void PushWeatherSettings()
+    {
+        if (Usb?.Connected == true) Usb.PushWeather();
+    }
 
     /// POST /sprite/{claude|codex}  multipart GIF upload — the device decodes
     /// and rescales the GIF on-board, then swaps the animation immediately.
     public static async Task UploadGif(byte[] gif, string slot)
     {
+        if (Usb?.Connected == true)
+        {
+            if (!await Usb.UploadGif(gif, slot)) throw new DeviceException("USB GIF 上传或设备解码失败");
+            return;
+        }
         var url = Resolve($"sprite/{slot}");
         using var content = new MultipartFormDataContent($"aiclock-{Guid.NewGuid()}");
         var filePart = new ByteArrayContent(gif);
@@ -157,12 +192,17 @@ static class DeviceClient
     }
 
     /// POST /sprite/{claude|codex}/reset — back to the compiled-in animation.
-    public static Task ResetSprite(string slot) => PostForm($"sprite/{slot}/reset", new());
+    public static Task ResetSprite(string slot)
+    {
+        if (Usb?.Connected == true) { Usb.ResetSprite(slot); return Task.CompletedTask; }
+        return PostForm($"sprite/{slot}/reset", new());
+    }
 
     /// GET /sprite/{claude|codex}/raw — the animation the device is actually
     /// using, wire format [1 byte frame count][RGB565 big-endian frames...].
     public static async Task<byte[]> FetchSpriteRaw(string slot)
     {
+        if (Usb?.Connected == true) return await Usb.FetchSpriteRaw(slot);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         byte[] data;
         try
@@ -217,6 +257,9 @@ static class DeviceClient
         => o.TryGetProperty(k, out var v)
             && (v.ValueKind == JsonValueKind.True || v.ValueKind == JsonValueKind.False)
             && v.GetBoolean();
+
+    static uint UInt(JsonElement o, string k)
+        => o.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetUInt32() : 0;
 
     // MARK: - discovery / pairing
 
@@ -317,6 +360,7 @@ static class DeviceClient
     /// rate-limited to once per 5 minutes.
     public static async Task HealPairingIfNeeded(int port)
     {
+        if (Usb?.Connected == true) return;
         if (DateTime.UtcNow - DevicePollAt < TimeSpan.FromMinutes(3)) return; // device is polling us
         if (_healInFlight || DateTime.UtcNow - _lastHealAttempt < TimeSpan.FromMinutes(5)) return;
         _healInFlight = true;

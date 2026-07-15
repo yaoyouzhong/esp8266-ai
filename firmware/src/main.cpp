@@ -24,6 +24,14 @@
 
 TFT_eSPI tft = TFT_eSPI();
 ESP8266WebServer webServer(80);
+WiFiManager wifiManager;
+
+bool wifiPortalActive = false;
+bool webServerStarted = false;
+unsigned long wifiDisconnectedSinceMs = 0;
+unsigned long lastWifiRetryMs = 0;
+const unsigned long WIFI_PORTAL_DELAY_MS = 15000;
+const unsigned long WIFI_RETRY_INTERVAL_MS = 30000;
 
 // ---------- custom sprite storage (LittleFS) ----------
 // Custom uploads replace the compiled-in default animation without needing a
@@ -72,9 +80,10 @@ unsigned long lastSwitchMs = 0;
 
 // Display override, settable from the Mac app via POST /api/display:
 // auto = follow working status, claude/codex = pin that app on screen,
-// net/music = show Mac-side telemetry pages instead of the pet.
-enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_NET, MODE_MUSIC };
+// domestic/net/music/stock/weather = show bridge-side telemetry pages instead of the pet.
+enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_DUAL, MODE_DOMESTIC, MODE_NET, MODE_MUSIC, MODE_STOCK, MODE_WEATHER };
 DisplayMode displayMode = MODE_AUTO;
+DisplayMode effectiveMode();
 
 // When AUTO and the Mac reports audio playing, the screen auto-switches to the
 // music page and back when it stops — same spirit as the Claude/Codex auto
@@ -95,6 +104,7 @@ long netQRx[NET_QUEUE], netQTx[NET_QUEUE]; // ring buffer of pending samples
 int netQHead = 0, netQCount = 0;
 long netSeq = -1;                          // last bridge sample seq consumed into the queue
 long netCurRx = 0, netCurTx = 0;           // smoothed readout for the header
+int netCpuPct = 0, netMemPct = 0;
 unsigned long lastNetPollMs = 0;
 unsigned long lastNetDrawMs = 0;
 bool netChromeDrawn = false;
@@ -105,6 +115,8 @@ const int NET_CHART_X = 8, NET_CHART_Y = 60, NET_CHART_W = 224, NET_CHART_H = 12
 long netHistRx[NET_CHART_W], netHistTx[NET_CHART_W]; // one 250ms sample per column
 long netScale = 10240;    // current "nice" full-scale value (whole chart shares it)
 String netLastDl, netLastUl, netLastScaleText; // change detection for partial redraws
+String netLastCpuVal, netLastMemVal;
+bool netSysLabelsDrawn = false;
 
 // ---------- music mode state ----------
 const int MUSIC_COVER_W = 128;
@@ -124,6 +136,55 @@ bool musicHasArtwork = false;
 bool musicChromeDrawn = false;
 unsigned long lastMusicPollMs = 0;
 
+// ---------- stock watchlist / weather clock state ----------
+const unsigned long STOCK_POLL_INTERVAL_MS = 5000;
+const int MAX_STOCKS = 4;
+const int STOCK_NAME_W = 156, STOCK_NAME_H = 20;
+struct StockRow { String code, price, pct; int up = 0; };
+StockRow stocks[MAX_STOCKS];
+int stockCount = 0;
+int stockNamesRev = -1, stockNamesDrawnRev = -1;
+bool stockEverLoaded = false, stockDirty = false, stockChromeDrawn = false;
+String stockLastCode[MAX_STOCKS], stockLastValue[MAX_STOCKS];
+unsigned long lastStockPollMs = 0;
+
+const unsigned long WEATHER_POLL_INTERVAL_MS = 15000;
+const int WEATHER_HEADER_W = 176, WEATHER_HEADER_H = 26;
+const int WEATHER_DATE_W = 190, WEATHER_DATE_H = 30;
+const int WEATHER_AIR_W = 42, WEATHER_AIR_H = 26;
+const int WEATHER_CONTENT_LEFT = 14;
+const int WEATHER_HEADER_Y = 1;
+const int WEATHER_DATE_X = WEATHER_CONTENT_LEFT, WEATHER_DATE_Y = 117;
+// Centre the air-quality badge in the visual gap between the header text and
+// the weather icon. 132 placed its centre noticeably too far to the right.
+const int WEATHER_AIR_X = 125, WEATHER_AIR_Y = 14;
+const int WEATHER_ICON_X = 202, WEATHER_ICON_Y = 27;
+const int WEATHER_ANIM_BOTTOM = 224;
+struct WeatherStatus {
+  float temp = 0, high = 0, low = 0, pm25 = -1;
+  int humidity = 0, icon = -1, animation = 0, utcOffsetS = 0, textRev = -1, dateCenterX = WEATHER_DATE_W / 2, headerCenterX = WEATHER_HEADER_W / 2;
+  uint32_t epochUtc = 0;
+  bool stale = false, loaded = false;
+};
+WeatherStatus weatherStatus;
+int weatherContentCenter() {
+  return WEATHER_DATE_X + constrain(weatherStatus.dateCenterX, 0, WEATHER_DATE_W - 1);
+}
+int weatherHeaderX() { return WEATHER_DATE_X; }
+int weatherHeaderCenter() {
+  return weatherHeaderX() + constrain(weatherStatus.headerCenterX, 0, WEATHER_HEADER_W - 1);
+}
+int weatherTextDrawnRev = -1;
+bool weatherChromeDrawn = false;
+unsigned long weatherSyncMs = 0, lastWeatherPollMs = 0, lastWeatherClockMs = 0;
+unsigned long lastWeatherAnimMs = 0;
+int weatherAnimFrame = 0;
+int weatherLastAnimation = -1;
+int weatherLastHour = -1, weatherLastMinute = -1, weatherLastSecond = -1, weatherLastStale = -1;
+void drawWeatherScreen(bool force);
+void drawStockCachedOrLoading();
+void drawWeatherCachedOrLoading();
+
 int claudeFrame = 0;
 int codexFrame = 0;
 unsigned long lastAnimMs = 0;
@@ -136,6 +197,7 @@ unsigned long lastFlashMs = 0;
 String bridgeHost;
 
 struct ClaudeStatus {
+  String plan;
   String status = "unknown";
   long tokensToday = 0;
   int sessionMin = 0;
@@ -148,6 +210,7 @@ struct ClaudeStatus {
 };
 
 struct CodexStatus {
+  String plan;
   String status = "unknown";
   long tokensToday = 0;
   float primaryPct = -1;
@@ -157,12 +220,65 @@ struct CodexStatus {
   bool needsInput = false;
 };
 
+struct DomesticProviderStatus {
+  String model;
+  long tokensToday = 0;
+  float planPct = -1;
+  String planPctText;
+  String remainingPctText;
+  float fiveHourPct = -1;
+  float weeklyPct = -1;
+};
+
+struct DomesticStatus {
+  String status = "offline";
+  String activeProvider;
+  bool needsInput = false;
+  // The bridge supplies this provider-neutral display payload. qwen/xiaomi
+  // remain as compatibility data; future vendors only need to populate active.
+  DomesticProviderStatus active;
+  DomesticProviderStatus qwen;
+  DomesticProviderStatus xiaomi;
+};
+
 ClaudeStatus claudeStatus;
 CodexStatus codexStatus;
+DomesticStatus domesticStatus;
 
 unsigned long lastPollMs = 0;
 unsigned long lastSuccessMs = 0;
 bool everPolled = false;
+
+// USB bridge frames share the CH340 serial stream with human-readable debug
+// logs. Only lines with this prefix are parsed as protocol messages.
+const char *USB_FRAME_PREFIX = "@AICLOCK ";
+const unsigned long USB_STALE_MS = 8000;
+unsigned long lastUsbStatusMs = 0;
+bool everUsbStatus = false;
+bool decodeGifToBin(const char *gifPath, const char *binPath, int targetW, int targetH);
+
+enum UsbBlobKind { USB_BLOB_NONE, USB_MUSIC_COVER, USB_MUSIC_TEXT, USB_STOCK_NAMES, USB_STOCK_NAMES_RLE, USB_WEATHER_HEADER, USB_WEATHER_DATE, USB_WEATHER_AIR, USB_WEATHER_LABELS, USB_WEATHER_LABELS_RLE, USB_GIF_CLAUDE, USB_GIF_CODEX };
+const char *USB_UI_TEMP_FILE = "/usb-ui.tmp";
+const char *USB_UI_BACKUP_FILE = "/usb-ui.bak";
+const char *STOCK_UI_CACHE_FILE = "/stock-ui.rle";
+const char *WEATHER_UI_CACHE_FILE = "/weather-ui.rle";
+struct UsbBlobState {
+  UsbBlobKind kind = USB_BLOB_NONE;
+  uint16_t transfer = 0;
+  uint16_t nextSeq = 0;
+  uint32_t expectedSize = 0;
+  uint32_t received = 0;
+  uint32_t expectedCrc = 0;
+  uint32_t crc = 0xffffffff;
+  int width = 0, height = 0;
+  int rowFill = 0, rowIndex = 0;
+  File file;
+  bool active = false;
+} usbBlob;
+
+bool usbBridgeActive() {
+  return everUsbStatus && millis() - lastUsbStatusMs < USB_STALE_MS;
+}
 
 // ---------- backlight brightness ----------
 // The panel backlight (TFT_BL, active LOW) is PWM-dimmable — the vendor's own
@@ -529,13 +645,133 @@ void drawAppLogo() {
   }
 }
 
-// Claude's ring percentage: real 5h OAuth quota from the bridge when known,
-// otherwise fall back to elapsed session time as a rough stand-in.
+// Compact Claude + Codex quota overview. It reuses TFT_eSPI's built-in fonts
+// and repaints only the section whose values changed, so status polling does
+// not flash the whole screen.
+String dualLastClaudeKey, dualLastCodexKey;
+
+String quotaResetText(int minutes) {
+  if (minutes < 0) return "";
+  if (minutes >= 1440) return String(minutes / 1440) + "d" + String((minutes % 1440) / 60) + "h";
+  if (minutes >= 60) return String(minutes / 60) + "h" + String(minutes % 60) + "m";
+  return String(minutes) + "m";
+}
+
+uint16_t quotaBarColor(float pct) {
+  if (pct >= 99.5f) return TFT_RED;
+  if (pct >= 80) return TFT_YELLOW;
+  return TFT_GREEN;
+}
+
+uint16_t dualPlanColor(const String &plan) {
+  if (plan == "PRO" || plan == "PRO LITE" || plan == "MAX"
+      || plan == "MAX 5X" || plan == "MAX 20X") return TFT_ORANGE;
+  if (plan == "PLUS") return TFT_CYAN;
+  if (plan == "TEAM" || plan == "BUSINESS" || plan == "ENTERPRISE") return TFT_MAGENTA;
+  return TFT_LIGHTGREY;
+}
+
+void drawDualRow(const char *label, float pct, int resetMin, int y) {
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(0x7BEF, TFT_BLACK);
+  tft.drawString(label, 20, y + 4, 2);
+  tft.drawString(quotaResetText(resetMin), 54, y + 7, 1);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(pctText(pct), 220, y, 4);
+  tft.fillRoundRect(20, y + 24, 200, 6, 3, 0x2104);
+  if (pct >= 0) {
+    int width = constrain((int)(200 * min(pct, 100.0f) / 100.0f), 0, 200);
+    if (width > 0) tft.fillRoundRect(20, y + 24, width, 6, 3, quotaBarColor(pct));
+  }
+}
+
+void drawDualSection(bool claude, bool force) {
+  String plan = claude ? claudeStatus.plan : codexStatus.plan;
+  String status = claude ? claudeStatus.status : codexStatus.status;
+  float firstPct = claude ? claudeStatus.fiveHourPct : codexStatus.primaryPct;
+  int firstReset = claude ? claudeStatus.fiveHourResetMin : codexStatus.primaryResetMin;
+  float weekPct = claude ? claudeStatus.sevenDayPct : codexStatus.weeklyPct;
+  int weekReset = claude ? claudeStatus.sevenDayResetMin : codexStatus.weeklyResetMin;
+  bool single = !claude && firstPct < 0;
+  String key = plan + "|" + status + "|" + String(firstPct, 1) + "|" + String(firstReset)
+      + "|" + String(weekPct, 1) + "|" + String(weekReset) + "|" + String(single);
+  String &lastKey = claude ? dualLastClaudeKey : dualLastCodexKey;
+  if (!force && key == lastKey) return;
+  lastKey = key;
+
+  int top = claude ? 29 : 126;
+  int height = claude ? 90 : 106;
+  tft.fillRect(0, top, SCREEN_W, height, TFT_BLACK);
+  uint16_t statusColor = status == "working" ? TFT_GREEN
+      : status == "idle" ? TFT_YELLOW : 0x39E7;
+  tft.fillCircle(18, top + 9, 4, statusColor);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(claude ? TFT_ORANGE : TFT_CYAN, TFT_BLACK);
+  drawBoldString(claude ? "CLAUDE" : "CODEX", 31, top, 2, claude ? TFT_ORANGE : TFT_CYAN);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(dualPlanColor(plan), TFT_BLACK);
+  tft.drawString(plan, 220, top + 2, 2);
+
+  if (single) {
+    drawDualRow("WK", weekPct, weekReset, top + 34);
+  } else {
+    drawDualRow("5H", firstPct, firstReset, top + 21);
+    drawDualRow("WK", weekPct, weekReset, top + 54);
+  }
+}
+
+void drawDualScreen(bool force = false) {
+  if (force) {
+    tft.fillScreen(TFT_BLACK);
+    dualLastClaudeKey = "";
+    dualLastCodexKey = "";
+    tft.setTextDatum(TC_DATUM);
+    drawBoldString("USAGE OVERVIEW", SCREEN_CX, 8, 2, TFT_WHITE);
+    tft.drawFastHLine(18, 121, 204, 0x2945);
+  }
+  drawDualSection(true, force);
+  drawDualSection(false, force);
+}
+
+String currentPlan() {
+  return currentApp == APP_CLAUDE ? claudeStatus.plan : codexStatus.plan;
+}
+
+uint16_t planColor(const String &plan) {
+  if (plan == "PRO" || plan == "PRO LITE") return TFT_ORANGE;
+  if (plan == "PLUS") return TFT_CYAN;
+  if (plan == "TEAM" || plan == "BUSINESS" || plan == "ENTERPRISE") return TFT_MAGENTA;
+  if (plan == "MAX" || plan == "MAX 5X" || plan == "MAX 20X") return TFT_ORANGE;
+  return TFT_LIGHTGREY;
+}
+
+String lastPlanBadge;
+
+void drawPlanBadge(bool force) {
+  String plan = currentPlan();
+  if (!force && plan == lastPlanBadge) return;
+  lastPlanBadge = plan;
+  tft.fillRect(60, 27, 112, 22, TFT_BLACK); // erase a previous, longer label
+  if (plan.length() == 0) return;
+  uint16_t color = planColor(plan);
+  int w = constrain(tft.textWidth(plan, 2) + 12, 34, 100);
+  tft.fillRoundRect(61, 29, w, 18, 5, TFT_BLACK);
+  tft.drawRoundRect(61, 29, w, 18, 5, color);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.drawString(plan, 61 + w / 2, 38, 2);
+}
+
+// Claude's ring percentage is only a real 5h quota. Unknown never becomes an
+// elapsed-time estimate: that was the source of the misleading "5%" display.
 float claudeRingPct() {
-  if (claudeStatus.fiveHourPct >= 0) return claudeStatus.fiveHourPct;
-  return claudeStatus.sessionWindowMin > 0
-             ? (100.0 * claudeStatus.sessionMin / claudeStatus.sessionWindowMin)
-             : 0;
+  return max(claudeStatus.fiveHourPct, 0.0f);
+}
+
+float codexRingPct() {
+  if (codexStatus.primaryPct >= 0) return codexStatus.primaryPct;
+  return max(codexStatus.weeklyPct, 0.0f);
 }
 
 // Redraws whichever app is currently active, full screen: quota ring +
@@ -553,12 +789,13 @@ void drawActiveApp() {
     if (showingCd == CD_NONE) drawClaudeSprite(claudeFrame);
     drawQuotaText(claudeRingPct(), claudeStatus.sevenDayPct, true);
   } else {
-    drawSquareRing(max(codexStatus.primaryPct, 0.0f), currentStatusColor());
+    drawSquareRing(codexRingPct(), currentStatusColor());
     if (showingCd == CD_NONE) drawCodexSprite(codexFrame);
     drawQuotaText(codexStatus.primaryPct, codexStatus.weeklyPct, true);
   }
   if (showingCd != CD_NONE) drawCountdown(true);
   drawAppLogo();
+  drawPlanBadge(true);
 }
 
 // In-place refresh after a bridge poll: ring repaint + only the text that
@@ -572,13 +809,14 @@ void refreshActiveApp() {
     drawSquareRing(claudeRingPct(), currentStatusColor());
     drawQuotaText(claudeRingPct(), claudeStatus.sevenDayPct, false);
   } else {
-    drawSquareRing(max(codexStatus.primaryPct, 0.0f), currentStatusColor());
+    drawSquareRing(codexRingPct(), currentStatusColor());
     drawQuotaText(codexStatus.primaryPct, codexStatus.weeklyPct, false);
   }
   if (showingCd != CD_NONE) {
     syncCountdownDeadline();
     drawCountdown(false);
   }
+  drawPlanBadge(false);
 }
 
 // Redraws just the ring (cheap) - used for status color animation ticks
@@ -587,7 +825,7 @@ void redrawRingOnly() {
   if (currentApp == APP_CLAUDE) {
     drawSquareRing(claudeRingPct(), currentStatusColor());
   } else {
-    drawSquareRing(max(codexStatus.primaryPct, 0.0f), currentStatusColor());
+    drawSquareRing(codexRingPct(), currentStatusColor());
   }
 }
 
@@ -652,21 +890,17 @@ void resetNetChart() {
   netLastDl = "";
   netLastUl = "";
   netLastScaleText = "";
+  netLastCpuVal = "";
+  netLastMemVal = "";
+  netSysLabelsDrawn = false;
   netQHead = 0;
   netQCount = 0;
   netSeq = -1;
 }
 
-// Full-scale steps: whole-chart shared scale snaps to the next "nice" value,
-// so bar heights stay comparable and the axis label reads cleanly.
-long niceNetScale(long maxV) {
-  static const long steps[] = {10240,    20480,    51200,     102400,    204800,    512000,
-                               1048576,  2097152,  5242880,   10485760,  20971520,  52428800,
-                               104857600, 209715200, 524288000};
-  for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
-    if (maxV <= steps[i]) return steps[i];
-  }
-  return steps[sizeof(steps) / sizeof(steps[0]) - 1];
+long adaptiveNetScale(long maxV) {
+  long scale = maxV + maxV / 7;
+  return max(scale, 10240L);
 }
 
 // Static chrome: labels that never change while in net mode.
@@ -677,7 +911,31 @@ void drawNetChrome() {
   tft.drawString("DOWN", 14, 10, 1);
   tft.drawString("UP", 134, 10, 1);
   tft.setTextDatum(TC_DATUM);
-  tft.drawString("MAC NET  -  56s", SCREEN_CX, 208, 1);
+  tft.drawString("SYSTEM MONITOR", SCREEN_CX, 226, 1);
+}
+
+void drawNetSysinfoIfChanged() {
+  const int rowY = 192;
+  tft.setTextDatum(TL_DATUM);
+  if (!netSysLabelsDrawn) {
+    netSysLabelsDrawn = true;
+    tft.setTextColor(0x7BEF, TFT_BLACK);
+    tft.drawString("CPU", 28, rowY + 6, 2);
+    tft.drawString("MEM", 130, rowY + 6, 2);
+  }
+  String cpu = String(netCpuPct) + "%";
+  String mem = String(netMemPct) + "%";
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  if (cpu != netLastCpuVal) {
+    netLastCpuVal = cpu;
+    tft.fillRect(62, rowY, 64, 26, TFT_BLACK);
+    tft.drawString(cpu, 62, rowY, 4);
+  }
+  if (mem != netLastMemVal) {
+    netLastMemVal = mem;
+    tft.fillRect(164, rowY, 64, 26, TFT_BLACK);
+    tft.drawString(mem, 164, rowY, 4);
+  }
 }
 
 // Header readouts (1s-averaged), each repainted only when its text changes.
@@ -715,7 +973,7 @@ void drawNetChart() {
     if (netHistRx[i] > maxV) maxV = netHistRx[i];
     if (netHistTx[i] > maxV) maxV = netHistTx[i];
   }
-  netScale = niceNetScale(maxV);
+  netScale = adaptiveNetScale(maxV);
 
   // Per-column heights (3-tap smoothed), then per-column line "bands": each
   // band spans from the previous column's height to this one's, so steep
@@ -725,7 +983,7 @@ void drawNetChart() {
   static uint8_t hRx[NET_CHART_W], hTx[NET_CHART_W];
   static uint8_t dlLo[NET_CHART_W], dlHi[NET_CHART_W]; // DL edge band, incl. 3px weight
   static uint8_t ulLo[NET_CHART_W], ulHi[NET_CHART_W]; // UL line band
-  const int LINE_T = 3; // stroke thickness in px
+  const int LINE_T = 5; // calibrated for the physical 240px panel
   for (int i = 0; i < NET_CHART_W; i++) {
     int lo = i > 0 ? i - 1 : 0, hi = i < NET_CHART_W - 1 ? i + 1 : NET_CHART_W - 1;
     long rx = (netHistRx[lo] + netHistRx[i] + netHistRx[hi]) / 3;
@@ -782,6 +1040,7 @@ void netDrawTick() {
   }
   if (netHeaderDirty) {
     drawNetHeaderIfChanged();
+    drawNetSysinfoIfChanged();
     netHeaderDirty = false;
   }
   if (netQCount == 0) return;
@@ -799,7 +1058,138 @@ void netDrawTick() {
 
 // Refills the sample queue from the bridge's /net endpoint. The seq field
 // tells us which samples we've already queued, so overlapping tails are fine.
+bool applyNetJson(JsonObject doc) {
+  netCurRx = doc["rx_bps"] | 0L;
+  netCurTx = doc["tx_bps"] | 0L;
+  netCpuPct = constrain(doc["cpu_pct"] | 0, 0, 100);
+  netMemPct = constrain(doc["mem_pct"] | 0, 0, 100);
+  netHeaderDirty = true;
+  long seq = doc["seq"] | -1L;
+  JsonArray rx = doc["rx"], tx = doc["tx"];
+  int n = min(rx.size(), tx.size());
+  int fresh = (netSeq < 0) ? min(n, 8) : (int)min((long)n, seq - netSeq);
+  if (fresh < 0) fresh = 0;
+  for (int i = n - fresh; i < n; i++) {
+    if (netQCount >= NET_QUEUE) break;
+    int tail = (netQHead + netQCount) % NET_QUEUE;
+    netQRx[tail] = rx[i].as<long>();
+    netQTx[tail] = tx[i].as<long>();
+    netQCount++;
+  }
+  if (seq >= 0) netSeq = seq;
+  return true;
+}
+
+String pctOrDash(float pct) {
+  return pct >= 0 ? String((int)pct) + "%" : "--";
+}
+
+String fitDomesticText(String text, int maxWidth, int font) {
+  while (text.length() > 0 && tft.textWidth(text, font) > maxWidth) {
+    text.remove(text.length() - 1);
+  }
+  return text;
+}
+
+struct DomesticDrawCache {
+  String provider;
+  String model;
+  String tokens;
+  String plan;
+  String remaining;
+  bool initialized = false;
+};
+
+DomesticDrawCache domesticDrawCache;
+
+void drawDomesticScreen(bool force = false) {
+  const DomesticProviderStatus &p = domesticStatus.active;
+  String provider = domesticStatus.activeProvider.length() ? domesticStatus.activeProvider : "qwen";
+  provider.toUpperCase();
+  String model = p.model.length() ? fitDomesticText(p.model, 112, 2) : "--";
+  String tokens = formatTokens(p.tokensToday);
+  String planNumber = p.planPct >= 0
+      ? (p.planPctText.length() ? p.planPctText : String((int)p.planPct)) : "--";
+  String plan = p.planPct >= 0 ? planNumber + "%" : "--";
+  String remaining = p.planPct >= 0
+      ? (p.remainingPctText.length() ? p.remainingPctText
+          : String(floorf(max(0.0f, 100.0f - p.planPct) * 100.0f) / 100.0f, 2))
+          + "% LEFT" : "QUOTA UNKNOWN";
+  const uint16_t panelColor = 0x1082;
+  const uint16_t mutedColor = 0x7BEF;
+  const uint16_t numberColor = 0xFFDF;
+
+  if (force) {
+    tft.fillScreen(TFT_BLACK);
+    ringLastPct = -1000;
+    domesticDrawCache.initialized = false;
+    tft.fillCircle(25, 30, 4, TFT_GREEN);
+    tft.fillRect(20, 53, 200, 1, mutedColor);
+    tft.fillRect(20, 53, 42, 1, TFT_GREEN);
+    tft.fillRoundRect(20, 177, 200, 38, 8, panelColor);
+    tft.drawRoundRect(20, 177, 200, 38, 8, 0x29A5);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(TFT_GREEN, panelColor);
+    tft.drawString("TODAY", 34, 184, 2);
+    tft.setTextColor(mutedColor, panelColor);
+    tft.drawString("TOKENS", 35, 201, 1);
+    tft.setTextDatum(TC_DATUM);
+    tft.setTextColor(mutedColor, TFT_BLACK);
+    tft.drawString("PLAN", SCREEN_CX, 73, 1);
+  }
+  drawSquareRing(max(p.planPct, 0.0f), TFT_GREEN);
+  if (force || !domesticDrawCache.initialized || provider != domesticDrawCache.provider) {
+    tft.fillRect(34, 20, 72, 22, TFT_BLACK);
+    tft.setTextDatum(TL_DATUM);
+    drawBoldString(provider, 36, 24, 2, TFT_GREEN);
+  }
+  if (force || !domesticDrawCache.initialized || model != domesticDrawCache.model) {
+    tft.fillRect(106, 20, 114, 22, TFT_BLACK);
+    tft.setTextDatum(TR_DATUM);
+    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    tft.drawString(model, 218, 24, 2);
+  }
+  if (force || !domesticDrawCache.initialized || plan != domesticDrawCache.plan) {
+    tft.fillRect(28, 90, 184, 54, TFT_BLACK);
+    int numberFont = planNumber.length() <= 3 ? 7 : planNumber.length() <= 6 ? 4 : 2;
+    int percentFont = numberFont == 7 ? 4 : 2;
+    int numberY = numberFont == 7 ? 90 : numberFont == 4 ? 101 : 108;
+    int percentY = numberFont == 7 ? 105 : numberFont == 4 ? 108 : 108;
+    int numberWidth = tft.textWidth(planNumber, numberFont);
+    int percentWidth = p.planPct >= 0 ? tft.textWidth("%", percentFont) : 0;
+    int left = SCREEN_CX - (numberWidth + (percentWidth ? 4 + percentWidth : 0)) / 2;
+    tft.setTextDatum(TL_DATUM);
+    drawBoldString(planNumber, left, numberY, numberFont, numberColor);
+    if (percentWidth) {
+      tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      tft.drawString("%", left + numberWidth + 4, percentY, percentFont);
+    }
+  }
+  if (force || !domesticDrawCache.initialized || remaining != domesticDrawCache.remaining) {
+    tft.fillRect(30, 151, 180, 16, TFT_BLACK);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(mutedColor, TFT_BLACK);
+    tft.drawString("REMAINING", 37, 153, 1);
+    tft.setTextDatum(TR_DATUM);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString(remaining, 203, 151, 2);
+  }
+  if (force || !domesticDrawCache.initialized || tokens != domesticDrawCache.tokens) {
+    tft.fillRect(104, 181, 101, 29, panelColor);
+    tft.setTextDatum(TR_DATUM);
+    tft.setTextColor(TFT_CYAN, panelColor);
+    tft.drawString(tokens, 203, 184, 4);
+  }
+  domesticDrawCache.provider = provider;
+  domesticDrawCache.model = model;
+  domesticDrawCache.tokens = tokens;
+  domesticDrawCache.plan = plan;
+  domesticDrawCache.remaining = remaining;
+  domesticDrawCache.initialized = true;
+}
+
 void pollNet() {
+  if (usbBridgeActive()) return;
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
   WiFiClient client;
   HTTPClient http;
@@ -810,23 +1200,7 @@ void pollNet() {
   if (code == HTTP_CODE_OK) {
     JsonDocument doc;
     if (!deserializeJson(doc, http.getString())) {
-      netCurRx = doc["rx_bps"] | 0L;
-      netCurTx = doc["tx_bps"] | 0L;
-      netHeaderDirty = true;
-      long seq = doc["seq"] | -1L;
-      JsonArray rx = doc["rx"], tx = doc["tx"];
-      int n = min(rx.size(), tx.size());
-      // how many of the tail samples are new to us
-      int fresh = (netSeq < 0) ? min(n, 8) : (int)min((long)n, seq - netSeq);
-      if (fresh < 0) fresh = 0;
-      for (int i = n - fresh; i < n; i++) {
-        if (netQCount >= NET_QUEUE) break; // queue full: drop the excess
-        int tail = (netQHead + netQCount) % NET_QUEUE;
-        netQRx[tail] = rx[i].as<long>();
-        netQTx[tail] = tx[i].as<long>();
-        netQCount++;
-      }
-      if (seq >= 0) netSeq = seq;
+      applyNetJson(doc.as<JsonObject>());
     }
   }
   http.end();
@@ -858,6 +1232,7 @@ void drawMusicCoverPlaceholder() {
 }
 
 bool drawMusicCoverFromBridge() {
+  if (usbBridgeActive()) return false; // binary artwork remains WiFi-only in v1
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0 || !musicHasArtwork) return false;
   WiFiClient client;
   HTTPClient http;
@@ -890,6 +1265,7 @@ bool drawMusicCoverFromBridge() {
 // Streams the Mac-rendered 232x44 title/artist strip and blits it row by
 // row — the only way to get CJK on screen without shipping a font.
 bool drawMusicTextFromBridge() {
+  if (usbBridgeActive()) return false; // use the metadata fallback over USB
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return false;
   WiFiClient client;
   HTTPClient http;
@@ -959,7 +1335,26 @@ void drawMusicScreen(bool coverChanged, bool textChanged) {
   tft.drawString(timeText(musicElapsed) + " / " + timeText(musicDuration), SCREEN_CX, 220, 1);
 }
 
+void applyMusicJson(JsonObject doc) {
+  musicTitle = doc["title"] | "";
+  musicArtist = doc["artist"] | "";
+  musicAlbum = doc["album"] | "";
+  musicPlaying = doc["playing"] | false;
+  statusMusicPlaying = musicPlaying;
+  musicElapsed = doc["elapsed"] | 0;
+  musicDuration = doc["duration"] | 0;
+  musicHasArtwork = doc["has_artwork"] | false;
+  int rev = doc["artwork_rev"] | -1;
+  bool coverChanged = rev != musicArtworkRev;
+  musicArtworkRev = rev;
+  int tRev = doc["text_rev"] | -1;
+  bool textChanged = tRev != musicTextRev;
+  musicTextRev = tRev;
+  if (effectiveMode() == MODE_MUSIC) drawMusicScreen(coverChanged, textChanged);
+}
+
 void pollMusic() {
+  if (usbBridgeActive()) return;
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
   WiFiClient client;
   HTTPClient http;
@@ -970,24 +1365,509 @@ void pollMusic() {
   if (code == HTTP_CODE_OK) {
     JsonDocument doc;
     if (!deserializeJson(doc, http.getString())) {
-      musicTitle = doc["title"] | "";
-      musicArtist = doc["artist"] | "";
-      musicAlbum = doc["album"] | "";
-      musicPlaying = doc["playing"] | false;
-      statusMusicPlaying = musicPlaying; // fast stop-detection while music shows
-      musicElapsed = doc["elapsed"] | 0;
-      musicDuration = doc["duration"] | 0;
-      musicHasArtwork = doc["has_artwork"] | false;
-      int rev = doc["artwork_rev"] | -1;
-      bool coverChanged = rev != musicArtworkRev;
-      musicArtworkRev = rev;
-      int tRev = doc["text_rev"] | -1;
-      bool textChanged = tRev != musicTextRev;
-      musicTextRev = tRev;
-      drawMusicScreen(coverChanged, textChanged);
+      applyMusicJson(doc.as<JsonObject>());
     }
   }
   http.end();
+}
+
+// ---------- stock watchlist ----------
+
+bool applyStockJson(JsonObject doc) {
+  JsonArray rows = doc["stocks"];
+  stockCount = 0;
+  for (JsonObject row : rows) {
+    if (stockCount >= MAX_STOCKS) break;
+    stocks[stockCount].code = row["code"] | "";
+    stocks[stockCount].price = row["price"] | "";
+    stocks[stockCount].pct = row["pct"] | "";
+    stocks[stockCount].up = row["up"] | 0;
+    stockCount++;
+  }
+  stockNamesRev = doc["names_rev"] | -1;
+  stockEverLoaded = true;
+  stockDirty = true;
+  return true;
+}
+
+void pollStock() {
+  if (usbBridgeActive() || WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
+  WiFiClient client;
+  HTTPClient http;
+  if (!http.begin(client, "http://" + bridgeHost + "/stock")) return;
+  http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
+  if (http.GET() == HTTP_CODE_OK) {
+    JsonDocument doc;
+    if (!deserializeJson(doc, http.getString())) applyStockJson(doc.as<JsonObject>());
+  }
+  http.end();
+}
+
+bool drawStockNamesFromBridge() {
+  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return false;
+  WiFiClient client;
+  HTTPClient http;
+  if (!http.begin(client, "http://" + bridgeHost + "/stock/names.raw")) return false;
+  http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
+  if (http.GET() != HTTP_CODE_OK) { http.end(); return false; }
+  WiFiClient *stream = http.getStreamPtr();
+  bool ok = true;
+  const size_t rowBytes = (size_t)STOCK_NAME_W * 2;
+  for (int stock = 0; stock < MAX_STOCKS && ok; stock++) {
+    for (int row = 0; row < STOCK_NAME_H; row++) {
+      if (stream->readBytes((uint8_t *)rowBuf, rowBytes) != (int)rowBytes) { ok = false; break; }
+      if (effectiveMode() == MODE_STOCK && stock < stockCount)
+        tft.pushImage(70, 6 + stock * 54 + row, STOCK_NAME_W, 1, rowBuf);
+      yield();
+    }
+  }
+  http.end();
+  return ok;
+}
+
+void drawStockScreen(bool force = false) {
+  if (force || !stockChromeDrawn) {
+    tft.fillScreen(TFT_BLACK);
+    stockChromeDrawn = true;
+    stockNamesDrawnRev = -1;
+    for (int i = 0; i < MAX_STOCKS; i++) { stockLastCode[i] = "\x01"; stockLastValue[i] = "\x01"; }
+    tft.setTextDatum(TC_DATUM);
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.drawString("STOCKS", SCREEN_CX, 228, 1);
+  }
+  stockDirty = false;
+  if (stockCount == 0) {
+    tft.fillRect(0, 0, SCREEN_W, 220, TFT_BLACK);
+    tft.setTextDatum(TC_DATUM);
+    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    tft.drawString(stockEverLoaded ? "No valid quotes" : "Waiting for bridge...", SCREEN_CX, 104, 2);
+    return;
+  }
+  for (int i = 0; i < MAX_STOCKS; i++) {
+    int y = 6 + i * 54;
+    bool has = i < stockCount;
+    String code = has ? stocks[i].code : "";
+    if (code != stockLastCode[i]) {
+      stockLastCode[i] = code;
+      stockNamesDrawnRev = -1;
+      tft.fillRect(0, y, SCREEN_W, 17, TFT_BLACK);
+      if (has) { tft.setTextDatum(TL_DATUM); tft.setTextColor(TFT_DARKGREY, TFT_BLACK); tft.drawString(code, 14, y, 2); }
+    }
+    String value = has ? stocks[i].price + "|" + stocks[i].pct + "|" + String(stocks[i].up) : "";
+    if (value != stockLastValue[i]) {
+      stockLastValue[i] = value;
+      tft.fillRect(0, y + 21, SCREEN_W, 33, TFT_BLACK);
+      if (has) {
+        tft.setTextDatum(TL_DATUM); tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        tft.drawString(stocks[i].price, 14, y + 22, 4);
+        uint16_t color = stocks[i].up > 0 ? TFT_RED : stocks[i].up < 0 ? TFT_GREEN : TFT_LIGHTGREY;
+        tft.setTextDatum(TR_DATUM); tft.setTextColor(color, TFT_BLACK);
+        tft.drawString(stocks[i].pct, 226, y + 22, 4);
+      }
+    }
+  }
+  if (!usbBridgeActive() && stockNamesRev >= 0 && stockNamesDrawnRev != stockNamesRev && drawStockNamesFromBridge())
+    stockNamesDrawnRev = stockNamesRev;
+}
+
+// ---------- weather clock ----------
+
+bool applyWeatherJson(JsonObject doc) {
+  weatherStatus.temp = doc["temp"] | 0.0f;
+  weatherStatus.high = doc["high"] | 0.0f;
+  weatherStatus.low = doc["low"] | 0.0f;
+  weatherStatus.pm25 = doc["pm25"] | -1.0f;
+  weatherStatus.humidity = doc["humidity"] | 0;
+  weatherStatus.icon = doc["icon"] | -1;
+  String animation = doc["animation"] | "robot";
+  weatherStatus.animation = animation == "house" ? 1 : animation == "plant" ? 2
+    : animation == "off" ? 3 : animation == "pet" ? 4 : 0;
+  weatherStatus.epochUtc = doc["epoch_utc"] | 0UL;
+  weatherStatus.utcOffsetS = doc["utc_offset_s"] | 0;
+  weatherStatus.stale = doc["stale"] | false;
+  weatherStatus.textRev = doc["text_rev"] | -1;
+  weatherStatus.dateCenterX = doc["date_center_x"] | (WEATHER_DATE_W / 2);
+  weatherStatus.headerCenterX = doc["header_center_x"] | (WEATHER_HEADER_W / 2);
+  weatherStatus.loaded = weatherStatus.epochUtc > 0;
+  weatherSyncMs = millis();
+  if (effectiveMode() == MODE_WEATHER) drawWeatherScreen(false);
+  return weatherStatus.loaded;
+}
+
+void pollWeather() {
+  if (usbBridgeActive() || WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
+  WiFiClient client;
+  HTTPClient http;
+  if (!http.begin(client, "http://" + bridgeHost + "/weather")) return;
+  http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
+  if (http.GET() == HTTP_CODE_OK) {
+    JsonDocument doc;
+    if (!deserializeJson(doc, http.getString())) applyWeatherJson(doc.as<JsonObject>());
+  }
+  http.end();
+}
+
+bool drawWeatherLabelFromBridge(const char *path, int width, int height, int x, int y) {
+  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return false;
+  WiFiClient client;
+  HTTPClient http;
+  if (!http.begin(client, "http://" + bridgeHost + path)) return false;
+  http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
+  if (http.GET() != HTTP_CODE_OK) { http.end(); return false; }
+  WiFiClient *stream = http.getStreamPtr();
+  const size_t rowBytes = (size_t)width * 2;
+  bool ok = true;
+  for (int row = 0; row < height; row++) {
+    if (stream->readBytes((uint8_t *)rowBuf, rowBytes) != (int)rowBytes) { ok = false; break; }
+    if (effectiveMode() == MODE_WEATHER) tft.pushImage(x, y + row, width, 1, rowBuf);
+    yield();
+  }
+  http.end();
+  return ok;
+}
+
+bool drawWeatherHeaderFromBridge() {
+  tft.fillRect(0, 0, 192, 28, TFT_BLACK);
+  return drawWeatherLabelFromBridge("/weather/header.raw", WEATHER_HEADER_W, WEATHER_HEADER_H, weatherHeaderX(), WEATHER_HEADER_Y);
+}
+
+bool drawWeatherDateFromBridge() {
+  return drawWeatherLabelFromBridge("/weather/date.raw", WEATHER_DATE_W, WEATHER_DATE_H, WEATHER_DATE_X, WEATHER_DATE_Y);
+}
+
+bool drawWeatherAirFromBridge() {
+  return drawWeatherLabelFromBridge("/weather/air.raw", WEATHER_AIR_W, WEATHER_AIR_H, WEATHER_AIR_X, WEATHER_AIR_Y);
+}
+
+void drawWeatherIcon(int x, int y, int icon) {
+  if (icon == 0 || icon == 1) {
+    tft.fillCircle(x, y, 10, TFT_YELLOW);
+    for (int i = 0; i < 8; i++) {
+      float a = i * 0.785f;
+      tft.drawLine(x + (int)(cos(a) * 14), y + (int)(sin(a) * 14), x + (int)(cos(a) * 19), y + (int)(sin(a) * 19), TFT_YELLOW);
+    }
+  }
+  if (icon == 1 || icon == 2 || icon == 4 || icon == 6) {
+    tft.fillCircle(x - 8, y + 4, 8, TFT_LIGHTGREY); tft.fillCircle(x + 2, y, 11, TFT_LIGHTGREY); tft.fillCircle(x + 12, y + 5, 7, TFT_LIGHTGREY);
+    tft.fillRect(x - 16, y + 4, 36, 9, TFT_LIGHTGREY);
+  }
+  if (icon == 3) { tft.drawCircle(x, y, 13, TFT_LIGHTGREY); tft.drawCircle(x + 5, y - 5, 10, TFT_LIGHTGREY); }
+  if (icon == 4 || icon == 6) for (int i = -10; i <= 12; i += 11) tft.drawLine(x + i, y + 18, x + i - 3, y + 27, TFT_CYAN);
+  if (icon == 5) for (int i = -10; i <= 12; i += 11) { tft.drawLine(x + i, y + 18, x + i - 3, y + 24, TFT_WHITE); tft.drawLine(x + i - 3, y + 18, x + i, y + 24, TFT_WHITE); }
+  if (icon == 6) { tft.drawLine(x + 2, y + 15, x - 4, y + 27, TFT_YELLOW); tft.drawLine(x - 4, y + 27, x + 2, y + 25, TFT_YELLOW); }
+}
+
+void epochToLocal(uint32_t utc, int offset, int &year, int &month, int &day, int &hour, int &minute, int &second, int &weekday) {
+  int64_t total = (int64_t)utc + offset;
+  int64_t days = total / 86400;
+  int64_t rest = total % 86400;
+  if (rest < 0) { rest += 86400; days--; }
+  hour = rest / 3600; minute = (rest % 3600) / 60; second = rest % 60;
+  weekday = (int)((days + 4) % 7); if (weekday < 0) weekday += 7;
+  int64_t z = days + 719468;
+  int era = (z >= 0 ? z : z - 146096) / 146097;
+  unsigned doe = (unsigned)(z - era * 146097);
+  unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  year = (int)yoe + era * 400;
+  unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  unsigned mp = (5 * doy + 2) / 153;
+  day = doy - (153 * mp + 2) / 5 + 1;
+  month = mp + (mp < 10 ? 3 : -9);
+  year += month <= 2;
+}
+
+void drawWeatherDigit(int digit, int x, int y, uint16_t color) {
+  static const uint8_t masks[10] = { 0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f };
+  const int w = 16, h = 30, t = 3, half = h / 2;
+  uint8_t mask = masks[constrain(digit, 0, 9)];
+  if (mask & 0x01) tft.fillRoundRect(x + t, y, w - t * 2, t, 1, color);
+  if (mask & 0x02) tft.fillRoundRect(x + w - t, y + t, t, half - t, 1, color);
+  if (mask & 0x04) tft.fillRoundRect(x + w - t, y + half, t, half - t, 1, color);
+  if (mask & 0x08) tft.fillRoundRect(x + t, y + h - t, w - t * 2, t, 1, color);
+  if (mask & 0x10) tft.fillRoundRect(x, y + half, t, half - t, 1, color);
+  if (mask & 0x20) tft.fillRoundRect(x, y + t, t, half - t, 1, color);
+  if (mask & 0x40) tft.fillRoundRect(x + t, y + half - 1, w - t * 2, t, 1, color);
+}
+
+void drawWeatherClock() {
+  if (!weatherStatus.loaded) return;
+  uint32_t utc = weatherStatus.epochUtc + (millis() - weatherSyncMs) / 1000;
+  int year, month, day, hour, minute, second, weekday;
+  epochToLocal(utc, weatherStatus.utcOffsetS, year, month, day, hour, minute, second, weekday);
+  String hourText = String(hour < 10 ? "0" : "") + String(hour);
+  String minuteText = String(minute < 10 ? "0" : "") + String(minute);
+  const int hourMinuteGap = 10;
+  const int secondGap = 8;
+  const int secondDigitStep = 20;
+  const int secondWidth = 36;
+  int hourWidth = tft.textWidth(hourText, 7);
+  int minuteWidth = tft.textWidth(minuteText, 7);
+  int hourMinuteWidth = hourWidth + hourMinuteGap + minuteWidth;
+  int groupWidth = hourMinuteWidth + secondGap + secondWidth;
+  // Font 7 has more visible side-bearing on the left than the hand-drawn
+  // seconds have on the right, so geometric centring looks right-heavy.
+  const int visualCenterOffset = -4;
+  int timeX = (SCREEN_W - groupWidth) / 2 + visualCenterOffset;
+  int secondX = timeX + hourMinuteWidth + secondGap;
+  if (hour != weatherLastHour || minute != weatherLastMinute) {
+    tft.fillRect(0, 52, SCREEN_W, 68, TFT_BLACK);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(hourText, timeX, 57, 7);
+    tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+    tft.drawString(minuteText, timeX + hourWidth + hourMinuteGap, 57, 7);
+    weatherLastHour = hour;
+    weatherLastMinute = minute;
+    weatherLastSecond = -1;
+  }
+  if (second != weatherLastSecond) {
+    tft.fillRect(secondX - 2, 70, secondWidth + 4, 39, TFT_BLACK);
+    drawWeatherDigit(second / 10, secondX, 75, TFT_LIGHTGREY);
+    drawWeatherDigit(second % 10, secondX + secondDigitStep, 75, TFT_LIGHTGREY);
+    weatherLastSecond = second;
+  }
+  int stale = weatherStatus.stale ? 1 : 0;
+  if (stale != weatherLastStale) {
+    tft.fillRect(232, 39, 7, 7, TFT_BLACK);
+    weatherLastStale = stale;
+  }
+}
+
+void drawWeatherRobotAnimation() {
+  // A tiny weather buddy: its colour follows the condition, it floats on a
+  // cloud, blinks, and sends a moving antenna pulse. It is deliberately more
+  // characterful than a second copy of the weather icon in the upper corner.
+  const int x = 184, y = 188 + ((weatherAnimFrame % 6) == 0 ? -2 : (weatherAnimFrame % 6) == 3 ? 2 : 0);
+  const int phase = weatherAnimFrame % 12;
+  const uint16_t body = weatherStatus.icon == 4 ? TFT_CYAN
+                      : weatherStatus.icon == 5 ? TFT_WHITE
+                      : weatherStatus.icon == 6 ? TFT_ORANGE
+                      : weatherStatus.icon == 3 ? TFT_LIGHTGREY : TFT_YELLOW;
+  // drifting cloud
+  int cloud = (phase % 4) * 2;
+  tft.fillCircle(156 + cloud, WEATHER_ANIM_BOTTOM - 8, 8, TFT_DARKGREY);
+  tft.fillCircle(168 + cloud, WEATHER_ANIM_BOTTOM - 13, 11, TFT_DARKGREY);
+  tft.fillCircle(181 + cloud, WEATHER_ANIM_BOTTOM - 8, 8, TFT_DARKGREY);
+  tft.fillRoundRect(149 + cloud, WEATHER_ANIM_BOTTOM - 8, 40, 8, 4, TFT_DARKGREY);
+  // rounded robot head and a live antenna
+  tft.fillRoundRect(x - 22, y - 22, 44, 36, 10, body);
+  tft.drawLine(x, y - 22, x + (phase < 6 ? 5 : -5), y - 31, body);
+  tft.fillCircle(x + (phase < 6 ? 5 : -5), y - 33, 3, phase % 3 == 0 ? TFT_MAGENTA : body);
+  bool blink = phase == 0 || phase == 1;
+  tft.setTextColor(TFT_BLACK, body);
+  if (blink) {
+    tft.drawFastHLine(x - 13, y - 6, 8, TFT_BLACK);
+    tft.drawFastHLine(x + 5, y - 6, 8, TFT_BLACK);
+  } else {
+    tft.fillCircle(x - 9, y - 6, 4, TFT_BLACK);
+    tft.fillCircle(x + 9, y - 6, 4, TFT_BLACK);
+    tft.fillCircle(x - 8, y - 7, 1, TFT_WHITE);
+    tft.fillCircle(x + 10, y - 7, 1, TFT_WHITE);
+  }
+  tft.drawArc(x, y + 3, 9, 6, 25, 155, TFT_BLACK, body);
+  if (weatherStatus.icon == 4 || weatherStatus.icon == 6) {
+    for (int i = 0; i < 3; i++) {
+      int dropY = 158 + ((phase * 5 + i * 17) % 28);
+      tft.drawLine(151 + i * 13, dropY, 148 + i * 13, dropY + 5, TFT_CYAN);
+    }
+  } else if (weatherStatus.icon == 5) {
+    for (int i = 0; i < 4; i++) {
+      int sx = 150 + ((i * 19 + phase * 3) % 78);
+      tft.drawFastHLine(sx - 2, 159 + i * 9, 5, TFT_WHITE);
+      tft.drawFastVLine(sx, 156 + i * 9, 7, TFT_WHITE);
+    }
+  } else {
+    tft.fillCircle(218, 162, 5 + (phase % 3), body);
+    for (int i = 0; i < 4; i++) {
+      float a = i * 1.57f + phase * 0.12f;
+      tft.drawLine(218 + (int)(cos(a) * 9), 162 + (int)(sin(a) * 9),
+                   218 + (int)(cos(a) * 13), 162 + (int)(sin(a) * 13), body);
+    }
+  }
+}
+
+void drawWeatherHouseAnimation() {
+  const int phase = weatherAnimFrame % 12;
+  // ground and a compact house
+  tft.drawFastHLine(153, WEATHER_ANIM_BOTTOM, 78, TFT_DARKGREY);
+  tft.fillRect(166, 190, 48, 33, TFT_ORANGE);
+  tft.fillTriangle(158, 192, 190, 167, 222, 192, TFT_RED);
+  tft.fillRect(173, 199, 12, 24, TFT_BROWN);
+  tft.fillRect(194, 198, 13, 12, (phase < 6) ? TFT_YELLOW : TFT_ORANGE);
+  tft.drawRect(194, 198, 13, 12, TFT_WHITE);
+  tft.drawFastVLine(200, 198, 12, TFT_WHITE);
+  tft.drawFastHLine(194, 204, 13, TFT_WHITE);
+  // chimney smoke drifts instead of leaving static pixels behind.
+  tft.fillRect(205, 170, 7, 15, TFT_DARKGREY);
+  int drift = phase / 3;
+  tft.fillCircle(211 + drift, 164, 3, TFT_LIGHTGREY);
+  tft.fillCircle(215 + drift, 158, 2, TFT_DARKGREY);
+  if (weatherStatus.icon == 4 || weatherStatus.icon == 6) {
+    for (int i = 0; i < 5; i++) {
+      int dropY = 158 + ((phase * 4 + i * 13) % 30);
+      tft.drawLine(153 + i * 16, dropY, 150 + i * 16, dropY + 5, TFT_CYAN);
+    }
+  } else if (weatherStatus.icon == 5) {
+    for (int i = 0; i < 5; i++) {
+      int sx = 153 + ((i * 17 + phase * 3) % 74);
+      int sy = 158 + ((i * 11 + phase * 2) % 29);
+      tft.drawPixel(sx, sy, TFT_WHITE); tft.drawPixel(sx + 1, sy, TFT_WHITE);
+    }
+  } else {
+    tft.fillCircle(224, 163, 5 + (phase % 2), TFT_YELLOW);
+  }
+}
+
+void drawWeatherPlantAnimation() {
+  const int phase = weatherAnimFrame % 12;
+  const int sway = phase < 6 ? phase / 2 : (11 - phase) / 2;
+  const int stemX = 188 + sway - 1;
+  // pot
+  tft.fillRoundRect(171, 204, 36, 8, 3, TFT_ORANGE);
+  tft.fillTriangle(175, 211, 203, 211, 199, WEATHER_ANIM_BOTTOM, TFT_BROWN);
+  tft.fillTriangle(175, 211, 199, WEATHER_ANIM_BOTTOM, 179, WEATHER_ANIM_BOTTOM, TFT_BROWN);
+  // swaying stem and leaves
+  tft.drawLine(189, 204, stemX, 171, TFT_GREEN);
+  tft.fillEllipse(stemX - 10, 177, 11, 6, TFT_GREEN);
+  tft.fillEllipse(stemX + 1, 185, 12, 6, TFT_GREEN);
+  tft.fillEllipse(stemX - 9, 193, 10, 5, TFT_DARKGREEN);
+  if (weatherStatus.icon == 4 || weatherStatus.icon == 6) {
+    for (int i = 0; i < 4; i++) {
+      int dropY = 154 + ((phase * 5 + i * 15) % 38);
+      tft.drawLine(154 + i * 21, dropY, 152 + i * 21, dropY + 5, TFT_CYAN);
+    }
+  } else if (weatherStatus.icon == 5) {
+    for (int i = 0; i < 5; i++) {
+      int sx = 153 + ((i * 18 + phase * 2) % 75);
+      tft.fillCircle(sx, 157 + i * 7, 1, TFT_WHITE);
+    }
+  } else {
+    tft.fillCircle(219, 162, 6 + (phase % 2), TFT_YELLOW);
+    for (int i = 0; i < 4; i++) {
+      float a = i * 1.57f + phase * 0.1f;
+      tft.drawLine(219 + (int)(cos(a) * 9), 162 + (int)(sin(a) * 9),
+                   219 + (int)(cos(a) * 13), 162 + (int)(sin(a) * 13), TFT_YELLOW);
+    }
+  }
+}
+
+void drawWeatherPetAnimation() {
+  const int phase = weatherAnimFrame % 12;
+  const bool blink = phase == 0 || phase == 1;
+  const uint16_t fur = weatherStatus.icon == 5 ? TFT_LIGHTGREY : TFT_ORANGE;
+  // Only erase pixels that can move. Clearing the full 88x76 area before
+  // repainting the large pet made the black intermediate frame visible.
+  tft.fillRect(148, 152, 88, 28, TFT_BLACK);
+  tft.fillRect(207, 193, 22, 24, TFT_BLACK);
+  // Curled tail swishes behind the body.
+  int tailLift = phase < 6 ? phase / 2 : (11 - phase) / 2;
+  tft.drawLine(207, 210, 219, 207 - tailLift, fur);
+  tft.drawLine(219, 207 - tailLift, 224, 198 + tailLift, fur);
+  tft.fillEllipse(190, 208, 20, 16, fur);
+  // Head, ears and paws.
+  tft.fillTriangle(173, 181, 178, 166, 184, 181, fur);
+  tft.fillTriangle(196, 181, 203, 166, 207, 183, fur);
+  tft.fillRoundRect(174, 176, 34, 29, 10, fur);
+  tft.fillEllipse(180, WEATHER_ANIM_BOTTOM - 4, 9, 4, TFT_LIGHTGREY);
+  tft.fillEllipse(201, WEATHER_ANIM_BOTTOM - 4, 9, 4, TFT_LIGHTGREY);
+  // Face alternates between open eyes and a blink.
+  if (blink) {
+    tft.drawFastHLine(180, 187, 7, TFT_BLACK);
+    tft.drawFastHLine(196, 187, 7, TFT_BLACK);
+  } else {
+    tft.fillCircle(183, 187, 3, TFT_BLACK);
+    tft.fillCircle(199, 187, 3, TFT_BLACK);
+    tft.drawPixel(184, 186, TFT_WHITE); tft.drawPixel(200, 186, TFT_WHITE);
+  }
+  tft.fillTriangle(188, 193, 194, 193, 191, 197, TFT_MAGENTA);
+  tft.drawLine(191, 197, 188, 200, TFT_BLACK);
+  tft.drawLine(191, 197, 194, 200, TFT_BLACK);
+  // Weather-reactive detail around the pet.
+  if (weatherStatus.icon == 4) {
+    for (int i = 0; i < 4; i++) {
+      int dropY = 154 + ((phase * 5 + i * 17) % 24);
+      tft.drawLine(153 + i * 22, dropY, 150 + i * 22, dropY + 5, TFT_CYAN);
+    }
+  } else if (weatherStatus.icon == 5) {
+    for (int i = 0; i < 5; i++) {
+      int sx = 153 + ((i * 18 + phase * 3) % 75);
+      tft.fillCircle(sx, 155 + (i % 3) * 8, 1, TFT_WHITE);
+    }
+  } else if (weatherStatus.icon == 6) {
+    uint16_t flash = phase == 0 || phase == 6 ? TFT_WHITE : TFT_YELLOW;
+    tft.drawLine(222, 154, 216, 166, flash);
+    tft.drawLine(216, 166, 222, 164, flash);
+    tft.drawLine(222, 164, 217, 176, flash);
+  } else {
+    tft.fillCircle(220, 159, 5 + (phase % 2), TFT_YELLOW);
+  }
+}
+
+void drawWeatherAnimation() {
+  bool animationChanged = weatherStatus.animation != weatherLastAnimation;
+  if (weatherStatus.animation != 4 || animationChanged) {
+    tft.fillRect(148, 152, 88, 76, TFT_BLACK);
+  }
+  weatherLastAnimation = weatherStatus.animation;
+  if (weatherStatus.animation == 1) drawWeatherHouseAnimation();
+  else if (weatherStatus.animation == 2) drawWeatherPlantAnimation();
+  else if (weatherStatus.animation == 4) drawWeatherPetAnimation();
+  else if (weatherStatus.animation != 3) drawWeatherRobotAnimation();
+}
+
+void drawWeatherScreen(bool force) {
+  if (force || !weatherChromeDrawn) {
+    tft.fillScreen(TFT_BLACK);
+    weatherChromeDrawn = true;
+    weatherTextDrawnRev = -1;
+    weatherLastHour = weatherLastMinute = weatherLastSecond = weatherLastStale = -1;
+  }
+  if (!weatherStatus.loaded) {
+    tft.setTextDatum(TC_DATUM); tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    tft.drawString("Set weather city in tray", SCREEN_CX, 102, 2);
+    return;
+  }
+  bool textNeedsUpdate = !usbBridgeActive() && weatherStatus.textRev >= 0
+    && weatherTextDrawnRev != weatherStatus.textRev;
+  if (textNeedsUpdate) textNeedsUpdate = drawWeatherHeaderFromBridge() && drawWeatherDateFromBridge();
+  tft.fillRect(184, 0, 52, 60, TFT_BLACK);
+  drawWeatherIcon(WEATHER_ICON_X, WEATHER_ICON_Y, weatherStatus.icon);
+  tft.fillRect(0, 28, WEATHER_AIR_X - 2, 23, TFT_BLACK);
+  int high = (int)(weatherStatus.high + (weatherStatus.high >= 0 ? 0.5f : -0.5f));
+  int low = (int)(weatherStatus.low + (weatherStatus.low >= 0 ? 0.5f : -0.5f));
+  String lowText = "L " + String(low) + "C";
+  String highText = "H " + String(high) + "C";
+  const int rangeGap = 10;
+  int lowWidth = tft.textWidth(lowText, 2);
+  int highWidth = tft.textWidth(highText, 2);
+  int rangeX = max(2, weatherHeaderCenter() - (lowWidth + rangeGap + highWidth) / 2);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK); tft.drawString(lowText, rangeX, 34, 2);
+  tft.setTextColor(TFT_ORANGE, TFT_BLACK); tft.drawString(highText, rangeX + lowWidth + rangeGap, 34, 2);
+  if (textNeedsUpdate && drawWeatherAirFromBridge()) weatherTextDrawnRev = weatherStatus.textRev;
+  drawWeatherClock();
+  tft.fillRect(WEATHER_CONTENT_LEFT, 158, 134, 72, TFT_BLACK);
+  int current = (int)(weatherStatus.temp + (weatherStatus.temp >= 0 ? 0.5f : -0.5f));
+  tft.setTextDatum(TL_DATUM); tft.setTextColor(TFT_RED, TFT_BLACK);
+  tft.fillCircle(WEATHER_CONTENT_LEFT + 4, 175, 4, TFT_RED);
+  tft.fillRoundRect(WEATHER_CONTENT_LEFT + 2, 162, 5, 14, 2, TFT_RED);
+  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK); tft.drawString("TEMP", WEATHER_CONTENT_LEFT + 16, 162, 1);
+  tft.fillRoundRect(WEATHER_CONTENT_LEFT + 16, 177, 60, 5, 3, TFT_DARKGREY);
+  tft.fillRoundRect(WEATHER_CONTENT_LEFT + 16, 177, constrain((current + 10) * 3 / 2, 0, 60), 5, 3, TFT_RED);
+  const int metricGap = 2;
+  const int metricRight = 144;
+  const int metricNumberRight = metricRight - max(tft.textWidth("C", 4), tft.textWidth("%", 4)) - metricGap;
+  tft.setTextDatum(TR_DATUM); tft.setTextColor(TFT_WHITE, TFT_BLACK); tft.drawString(String(current), metricNumberRight, 162, 4);
+  tft.setTextDatum(TL_DATUM); tft.drawString("C", metricNumberRight + metricGap, 162, 4);
+  tft.setTextDatum(TL_DATUM); tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.fillCircle(WEATHER_CONTENT_LEFT + 5, 212, 5, TFT_GREEN);
+  tft.fillTriangle(WEATHER_CONTENT_LEFT, 212, WEATHER_CONTENT_LEFT + 10, 212, WEATHER_CONTENT_LEFT + 5, 199, TFT_GREEN);
+  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK); tft.drawString("HUMID", WEATHER_CONTENT_LEFT + 16, 198, 1);
+  tft.fillRoundRect(WEATHER_CONTENT_LEFT + 16, 214, 60, 5, 3, TFT_DARKGREY);
+  tft.fillRoundRect(WEATHER_CONTENT_LEFT + 16, 214, constrain(weatherStatus.humidity * 60 / 100, 0, 60), 5, 3, TFT_GREEN);
+  tft.setTextDatum(TR_DATUM); tft.setTextColor(TFT_WHITE, TFT_BLACK); tft.drawString(String(weatherStatus.humidity), metricNumberRight, 199, 4);
+  tft.setTextDatum(TL_DATUM); tft.drawString("%", metricNumberRight + metricGap, 199, 4);
+  drawWeatherAnimation();
 }
 
 // ---------- WiFi / bridge polling ----------
@@ -1007,19 +1887,26 @@ void configModeCallback(WiFiManager *wm) {
 }
 
 void setupWiFi() {
-  WiFiManager wm;
-  wm.setAPCallback(configModeCallback);
-
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Connecting WiFi...", 8, 100, 2);
-
-  Serial.println("[wifi] starting WiFiManager autoConnect...");
-  bool ok = wm.autoConnect(WIFI_PORTAL_AP_NAME);
-  Serial.printf("[wifi] autoConnect result=%d ssid=%s ip=%s\n", ok, WiFi.SSID().c_str(),
-                WiFi.localIP().toString().c_str());
+  wifiManager.setAPCallback(configModeCallback);
+  wifiManager.setConfigPortalBlocking(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin();
+  wifiDisconnectedSinceMs = millis();
+  lastWifiRetryMs = millis();
+  Serial.println("[wifi] connecting in background...");
   Serial.printf("[wifi] bridge host = '%s'\n", bridgeHost.c_str());
+}
+
+void readDomesticProvider(JsonObject source, DomesticProviderStatus &target) {
+  if (source.isNull()) return;
+  target.model = source["model"] | "";
+  target.tokensToday = source["tokens_today"] | 0;
+  target.planPct = source["plan_pct"] | -1.0;
+  target.planPctText = source["plan_pct_text"] | "";
+  target.remainingPctText = source["remaining_pct_text"] | "";
+  target.fiveHourPct = source["five_hour_pct"] | -1.0;
+  target.weeklyPct = source["weekly_pct"] | -1.0;
 }
 
 bool parseStatusJson(const String &payload) {
@@ -1029,6 +1916,7 @@ bool parseStatusJson(const String &payload) {
 
   JsonObject c = doc["claude"];
   if (!c.isNull()) {
+    claudeStatus.plan = c["plan"] | "";
     claudeStatus.status = c["status"] | "unknown";
     claudeStatus.tokensToday = c["tokens_today"] | 0;
     claudeStatus.sessionMin = c["session_min"] | 0;
@@ -1042,6 +1930,7 @@ bool parseStatusJson(const String &payload) {
 
   JsonObject x = doc["codex"];
   if (!x.isNull()) {
+    codexStatus.plan = x["plan"] | "";
     codexStatus.status = x["status"] | "unknown";
     codexStatus.tokensToday = x["tokens_today"] | 0;
     codexStatus.primaryPct = x["primary_pct"] | -1.0;
@@ -1049,6 +1938,18 @@ bool parseStatusJson(const String &payload) {
     codexStatus.weeklyPct = x["weekly_pct"] | -1.0;
     codexStatus.weeklyResetMin = x["weekly_reset_min"] | -1;
     codexStatus.needsInput = x["needs_input"] | false;
+  }
+  JsonObject d = doc["domestic"];
+  if (!d.isNull()) {
+    domesticStatus.status = d["status"] | "offline";
+    domesticStatus.activeProvider = d["active_provider"] | "";
+    domesticStatus.needsInput = d["needs_input"] | false;
+    readDomesticProvider(d["qwen"], domesticStatus.qwen);
+    readDomesticProvider(d["xiaomi"], domesticStatus.xiaomi);
+    JsonObject active = d["active"];
+    if (!active.isNull()) readDomesticProvider(active, domesticStatus.active);
+    else domesticStatus.active = domesticStatus.activeProvider == "xiaomi"
+                                   ? domesticStatus.xiaomi : domesticStatus.qwen;
   }
   statusMusicPlaying = doc["music_playing"] | false;
   return true;
@@ -1059,13 +1960,16 @@ bool parseStatusJson(const String &payload) {
 // music page.
 DisplayMode effectiveMode() {
   if (displayMode == MODE_AUTO) {
+    if (domesticStatus.needsInput) return MODE_DOMESTIC;
     if (claudeStatus.needsInput || codexStatus.needsInput) return MODE_AUTO;
     if (statusMusicPlaying) return MODE_MUSIC;
+    if (domesticStatus.status == "working") return MODE_DOMESTIC;
   }
   return displayMode;
 }
 
 void pollBridge() {
+  if (usbBridgeActive()) return;
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) {
     Serial.printf("[bridge] skip poll: wifi=%d host='%s'\n", WiFi.status() == WL_CONNECTED, bridgeHost.c_str());
     return;
@@ -1099,7 +2003,11 @@ void pollBridge() {
   }
   http.end();
   DisplayMode eff = effectiveMode();
-  if (eff != MODE_NET && eff != MODE_MUSIC) {
+  if (eff == MODE_DOMESTIC) {
+    drawDomesticScreen();
+  } else if (eff == MODE_DUAL) {
+    drawDualScreen();
+  } else if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK && eff != MODE_WEATHER) {
     // Only a real app switch clears the screen; a plain data refresh paints
     // in place so the poll doesn't flash the whole display.
     if (updateActiveApp()) drawActiveApp();
@@ -1200,12 +2108,32 @@ void handleSave() {
 const char *displayModeName(DisplayMode m) {
   if (m == MODE_CLAUDE) return "claude";
   if (m == MODE_CODEX) return "codex";
+  if (m == MODE_DUAL) return "dual";
+  if (m == MODE_DOMESTIC) return "domestic";
   if (m == MODE_NET) return "net";
   if (m == MODE_MUSIC) return "music";
+  if (m == MODE_STOCK) return "stock";
+  if (m == MODE_WEATHER) return "weather";
   return "auto";
 }
 
-void handleApiInfo() {
+uint32_t crc32Update(uint32_t crc, const uint8_t *data, size_t length);
+
+uint32_t cachedFileCrc(const char *path) {
+  File file = LittleFS.open(path, "r");
+  if (!file) return 0;
+  uint32_t crc = 0xffffffff;
+  uint8_t buffer[128];
+  while (file.available()) {
+    int count = file.read(buffer, sizeof(buffer));
+    if (count <= 0) { file.close(); return 0; }
+    crc = crc32Update(crc, buffer, count);
+  }
+  file.close();
+  return crc ^ 0xffffffff;
+}
+
+String deviceInfoJson() {
   JsonDocument doc;
   doc["ip"] = WiFi.localIP().toString();
   doc["ssid"] = WiFi.SSID();
@@ -1218,18 +2146,30 @@ void handleApiInfo() {
   doc["sprite_rev"] = spriteRev;
   doc["brightness"] = brightness;
   doc["fw"] = FW_VERSION;
+  JsonObject cache = doc["ui_cache"].to<JsonObject>();
+  cache["stock"] = LittleFS.exists(STOCK_UI_CACHE_FILE);
+  cache["weather"] = LittleFS.exists(WEATHER_UI_CACHE_FILE);
+  cache["stock_crc"] = cachedFileCrc(STOCK_UI_CACHE_FILE);
+  cache["weather_crc"] = cachedFileCrc(WEATHER_UI_CACHE_FILE);
   JsonObject c = doc["claude"].to<JsonObject>();
+  c["plan"] = claudeStatus.plan;
   c["status"] = claudeStatus.status;
   c["custom_sprite"] = claudeCustom;
   c["w"] = CLAUDE_SPRITE_W;
   c["h"] = CLAUDE_SPRITE_H;
   JsonObject x = doc["codex"].to<JsonObject>();
+  x["plan"] = codexStatus.plan;
   x["status"] = codexStatus.status;
   x["custom_sprite"] = codexCustom;
   x["w"] = CODEX_SPRITE_W;
   x["h"] = CODEX_SPRITE_H;
   String out;
   serializeJson(doc, out);
+  return out;
+}
+
+void handleApiInfo() {
+  String out = deviceInfoJson();
   webServer.send(200, "application/json", out);
 }
 
@@ -1238,19 +2178,34 @@ void handleApiDisplay() {
   if (mode == "auto") displayMode = MODE_AUTO;
   else if (mode == "claude") displayMode = MODE_CLAUDE;
   else if (mode == "codex") displayMode = MODE_CODEX;
+  else if (mode == "dual") displayMode = MODE_DUAL;
+  else if (mode == "domestic") displayMode = MODE_DOMESTIC;
   else if (mode == "net") displayMode = MODE_NET;
   else if (mode == "music") displayMode = MODE_MUSIC;
+  else if (mode == "stock") displayMode = MODE_STOCK;
+  else if (mode == "weather") displayMode = MODE_WEATHER;
   else {
-    webServer.send(400, "text/plain", "mode must be auto|claude|codex|net|music");
+    webServer.send(400, "text/plain", "mode must be auto|claude|codex|dual|domestic|net|music|stock|weather");
     return;
   }
   Serial.printf("[api] display mode = %s\n", mode.c_str());
+  lastEffectiveMode = effectiveMode();
   if (displayMode == MODE_NET) {
     netChromeDrawn = false;
     lastNetPollMs = 0; // poll + draw on the next loop tick
   } else if (displayMode == MODE_MUSIC) {
     musicChromeDrawn = false;
     lastMusicPollMs = 0; // poll + draw on the next loop tick
+  } else if (displayMode == MODE_DUAL) {
+    drawDualScreen(true);
+  } else if (displayMode == MODE_DOMESTIC) {
+    drawDomesticScreen(true);
+  } else if (displayMode == MODE_STOCK) {
+    lastStockPollMs = 0;
+    drawStockCachedOrLoading();
+  } else if (displayMode == MODE_WEATHER) {
+    lastWeatherPollMs = 0;
+    drawWeatherCachedOrLoading();
   } else {
     updateActiveApp();
     drawActiveApp(); // unconditional: also repaints over a previous net chart
@@ -1272,6 +2227,615 @@ void handleApiBrightness() {
   saveBrightness();
   Serial.printf("[api] brightness = %d\n", brightness);
   webServer.send(200, "text/plain", "ok");
+}
+
+void sendUsbFrame(const char *type, const String &data = "") {
+  Serial.print(USB_FRAME_PREFIX);
+  Serial.print("{\"type\":\"");
+  Serial.print(type);
+  Serial.print("\",\"version\":1");
+  if (data.length()) {
+    Serial.print(",\"data\":");
+    Serial.print(data);
+  }
+  Serial.println("}");
+}
+
+uint32_t crc32Update(uint32_t crc, const uint8_t *data, size_t length) {
+  while (length--) {
+    crc ^= *data++;
+    for (int bit = 0; bit < 8; bit++)
+      crc = (crc & 1) ? (crc >> 1) ^ 0xedb88320UL : crc >> 1;
+  }
+  return crc;
+}
+
+void sendBinaryAck(uint16_t transfer, int seq, const char *stage, bool ok, const char *reason = "") {
+  JsonDocument doc;
+  doc["type"] = "binary_ack";
+  doc["version"] = 1;
+  doc["transfer"] = transfer;
+  doc["seq"] = seq;
+  doc["stage"] = stage;
+  doc["ok"] = ok;
+  if (reason[0]) doc["reason"] = reason;
+  Serial.print(USB_FRAME_PREFIX);
+  serializeJson(doc, Serial);
+  Serial.println();
+}
+
+size_t cobsDecode(const uint8_t *input, size_t length, uint8_t *output, size_t capacity) {
+  size_t read = 0, write = 0;
+  while (read < length) {
+    uint8_t code = input[read++];
+    if (code == 0 || read + code - 1 > length) return 0;
+    for (uint8_t i = 1; i < code; i++) {
+      if (write >= capacity) return 0;
+      output[write++] = input[read++];
+    }
+    if (code != 0xff && read < length) {
+      if (write >= capacity) return 0;
+      output[write++] = 0;
+    }
+  }
+  return write;
+}
+
+size_t cobsEncode(const uint8_t *input, size_t length, uint8_t *output, size_t capacity) {
+  size_t read = 0, write = 1, codeAt = 0;
+  uint8_t code = 1;
+  while (read < length) {
+    if (input[read] == 0) {
+      if (codeAt >= capacity || write >= capacity) return 0;
+      output[codeAt] = code; codeAt = write++; code = 1; read++;
+    } else {
+      if (write >= capacity) return 0;
+      output[write++] = input[read++];
+      if (++code == 0xff) {
+        if (codeAt >= capacity || write >= capacity) return 0;
+        output[codeAt] = code; codeAt = write++; code = 1;
+      }
+    }
+  }
+  if (codeAt >= capacity) return 0;
+  output[codeAt] = code;
+  return write;
+}
+
+void cancelUsbBlob() {
+  if (usbBlob.file) usbBlob.file.close();
+  usbBlob.active = false;
+  usbBlob.kind = USB_BLOB_NONE;
+}
+
+void beginUsbBlob(JsonDocument &doc) {
+  cancelUsbBlob();
+  String kind = doc["kind"] | "";
+  if (kind == "music_cover") usbBlob.kind = USB_MUSIC_COVER;
+  else if (kind == "music_text") usbBlob.kind = USB_MUSIC_TEXT;
+  else if (kind == "stock_names") usbBlob.kind = USB_STOCK_NAMES;
+  else if (kind == "stock_names_rle") usbBlob.kind = USB_STOCK_NAMES_RLE;
+  else if (kind == "weather_header") usbBlob.kind = USB_WEATHER_HEADER;
+  else if (kind == "weather_date") usbBlob.kind = USB_WEATHER_DATE;
+  else if (kind == "weather_air") usbBlob.kind = USB_WEATHER_AIR;
+  else if (kind == "weather_labels") usbBlob.kind = USB_WEATHER_LABELS;
+  else if (kind == "weather_labels_rle") usbBlob.kind = USB_WEATHER_LABELS_RLE;
+  else if (kind == "gif_claude") usbBlob.kind = USB_GIF_CLAUDE;
+  else if (kind == "gif_codex") usbBlob.kind = USB_GIF_CODEX;
+  usbBlob.transfer = doc["transfer"] | 0;
+  usbBlob.expectedSize = doc["size"] | 0UL;
+  usbBlob.expectedCrc = doc["crc32"] | 0UL;
+  usbBlob.width = doc["width"] | 0;
+  usbBlob.height = doc["height"] | 0;
+  usbBlob.nextSeq = 0; usbBlob.received = 0; usbBlob.crc = 0xffffffff;
+  usbBlob.rowFill = 0; usbBlob.rowIndex = 0;
+
+  bool ok = usbBlob.kind != USB_BLOB_NONE && usbBlob.expectedSize > 0;
+  if (usbBlob.kind == USB_MUSIC_COVER)
+    ok = ok && usbBlob.width == MUSIC_COVER_W && usbBlob.height == MUSIC_COVER_H
+      && usbBlob.expectedSize == (uint32_t)MUSIC_COVER_W * MUSIC_COVER_H * 2;
+  if (usbBlob.kind == USB_MUSIC_TEXT)
+    ok = ok && usbBlob.width == MUSIC_TEXT_W && usbBlob.height == MUSIC_TEXT_H
+      && usbBlob.expectedSize == (uint32_t)MUSIC_TEXT_W * MUSIC_TEXT_H * 2;
+  if (usbBlob.kind == USB_STOCK_NAMES)
+    ok = ok && usbBlob.width == STOCK_NAME_W && usbBlob.height == STOCK_NAME_H * MAX_STOCKS
+      && usbBlob.expectedSize == (uint32_t)STOCK_NAME_W * STOCK_NAME_H * MAX_STOCKS * 2;
+  if (usbBlob.kind == USB_STOCK_NAMES_RLE)
+    ok = ok && usbBlob.width == STOCK_NAME_W && usbBlob.height == STOCK_NAME_H * MAX_STOCKS
+      && usbBlob.expectedSize <= (uint32_t)STOCK_NAME_W * STOCK_NAME_H * MAX_STOCKS * 2;
+  if (usbBlob.kind == USB_WEATHER_HEADER)
+    ok = ok && usbBlob.width == WEATHER_HEADER_W && usbBlob.height == WEATHER_HEADER_H
+      && usbBlob.expectedSize == (uint32_t)WEATHER_HEADER_W * WEATHER_HEADER_H * 2;
+  if (usbBlob.kind == USB_WEATHER_DATE)
+    ok = ok && usbBlob.width == WEATHER_DATE_W && usbBlob.height == WEATHER_DATE_H
+      && usbBlob.expectedSize == (uint32_t)WEATHER_DATE_W * WEATHER_DATE_H * 2;
+  if (usbBlob.kind == USB_WEATHER_AIR)
+    ok = ok && usbBlob.width == WEATHER_AIR_W && usbBlob.height == WEATHER_AIR_H
+      && usbBlob.expectedSize == (uint32_t)WEATHER_AIR_W * WEATHER_AIR_H * 2;
+  if (usbBlob.kind == USB_WEATHER_LABELS)
+    ok = ok && usbBlob.expectedSize == (uint32_t)WEATHER_HEADER_W * WEATHER_HEADER_H * 2
+      + (uint32_t)WEATHER_DATE_W * WEATHER_DATE_H * 2
+      + (uint32_t)WEATHER_AIR_W * WEATHER_AIR_H * 2;
+  if (usbBlob.kind == USB_WEATHER_LABELS_RLE)
+    ok = ok && usbBlob.expectedSize <= (uint32_t)WEATHER_HEADER_W * WEATHER_HEADER_H * 2
+      + (uint32_t)WEATHER_DATE_W * WEATHER_DATE_H * 2
+      + (uint32_t)WEATHER_AIR_W * WEATHER_AIR_H * 2;
+  if (usbBlob.kind == USB_STOCK_NAMES || usbBlob.kind == USB_STOCK_NAMES_RLE
+      || usbBlob.kind == USB_WEATHER_LABELS || usbBlob.kind == USB_WEATHER_LABELS_RLE) {
+    LittleFS.remove(USB_UI_TEMP_FILE);
+    usbBlob.file = LittleFS.open(USB_UI_TEMP_FILE, "w");
+    ok = ok && (bool)usbBlob.file;
+  }
+  if (usbBlob.kind == USB_GIF_CLAUDE || usbBlob.kind == USB_GIF_CODEX) {
+    ok = ok && usbBlob.expectedSize <= 1500000UL;
+    const char *path = usbBlob.kind == USB_GIF_CLAUDE ? CLAUDE_GIF_FILE : CODEX_GIF_FILE;
+    LittleFS.remove(path);
+    usbBlob.file = LittleFS.open(path, "w");
+    ok = ok && (bool)usbBlob.file;
+  }
+  usbBlob.active = ok;
+  sendBinaryAck(usbBlob.transfer, -1, "begin", ok);
+}
+
+void handleUsbBinaryFrame(const uint8_t *encoded, size_t encodedLen) {
+  uint8_t frame[524];
+  size_t frameLen = cobsDecode(encoded, encodedLen, frame, sizeof(frame));
+  if (frameLen < 12 || frame[0] != 1 || frame[1] != 1) return;
+  uint16_t transfer = frame[2] | ((uint16_t)frame[3] << 8);
+  uint16_t seq = frame[4] | ((uint16_t)frame[5] << 8);
+  uint16_t length = frame[6] | ((uint16_t)frame[7] << 8);
+  if (length > 512 || frameLen != (size_t)12 + length) return;
+  uint32_t expected = (uint32_t)frame[8 + length]
+    | ((uint32_t)frame[9 + length] << 8) | ((uint32_t)frame[10 + length] << 16)
+    | ((uint32_t)frame[11 + length] << 24);
+  uint32_t actual = crc32Update(0xffffffff, frame, 8 + length) ^ 0xffffffff;
+  if (!usbBlob.active || transfer != usbBlob.transfer || seq != usbBlob.nextSeq
+      || expected != actual || usbBlob.received + length > usbBlob.expectedSize) {
+    sendBinaryAck(transfer, seq, "chunk", false);
+    return;
+  }
+  lastUsbStatusMs = millis();
+  everUsbStatus = true;
+
+  const uint8_t *payload = frame + 8;
+  usbBlob.crc = crc32Update(usbBlob.crc, payload, length);
+  if (usbBlob.file) {
+    if (usbBlob.file.write(payload, length) != length) {
+      cancelUsbBlob();
+      sendBinaryAck(transfer, seq, "chunk", false);
+      return;
+    }
+  } else {
+    int rowBytes = usbBlob.width * 2;
+    for (uint16_t i = 0; i < length; i++) {
+      ((uint8_t *)rowBuf)[usbBlob.rowFill++] = payload[i];
+      if (usbBlob.rowFill == rowBytes) {
+        if (effectiveMode() == MODE_MUSIC) {
+          int x = usbBlob.kind == USB_MUSIC_COVER ? (SCREEN_W - MUSIC_COVER_W) / 2 : MUSIC_TEXT_X;
+          int y = usbBlob.kind == USB_MUSIC_COVER ? 14 : MUSIC_TEXT_Y;
+          tft.pushImage(x, y + usbBlob.rowIndex, usbBlob.width, 1, rowBuf);
+        } else if (effectiveMode() == MODE_STOCK && usbBlob.kind == USB_STOCK_NAMES) {
+          int stock = usbBlob.rowIndex / STOCK_NAME_H;
+          int row = usbBlob.rowIndex % STOCK_NAME_H;
+          if (stock < stockCount) tft.pushImage(70, 6 + stock * 54 + row, STOCK_NAME_W, 1, rowBuf);
+        } else if (effectiveMode() == MODE_WEATHER && usbBlob.kind == USB_WEATHER_HEADER) {
+          tft.pushImage(weatherHeaderX(), WEATHER_HEADER_Y + usbBlob.rowIndex, WEATHER_HEADER_W, 1, rowBuf);
+        } else if (effectiveMode() == MODE_WEATHER && usbBlob.kind == USB_WEATHER_DATE) {
+          tft.pushImage(WEATHER_DATE_X, WEATHER_DATE_Y + usbBlob.rowIndex, WEATHER_DATE_W, 1, rowBuf);
+        } else if (effectiveMode() == MODE_WEATHER && usbBlob.kind == USB_WEATHER_AIR) {
+          tft.pushImage(WEATHER_AIR_X, WEATHER_AIR_Y + usbBlob.rowIndex, WEATHER_AIR_W, 1, rowBuf);
+        }
+        usbBlob.rowFill = 0;
+        usbBlob.rowIndex++;
+      }
+    }
+  }
+  usbBlob.received += length;
+  usbBlob.nextSeq++;
+  sendBinaryAck(transfer, seq, "chunk", true);
+}
+
+struct Rle565Reader {
+  int remaining = 0;
+  bool repeat = false;
+  uint8_t hi = 0, lo = 0;
+};
+
+bool readUiPixels(File &file, bool compressed, Rle565Reader &rle, uint8_t *output, size_t pixels) {
+  if (!compressed) return file.read(output, pixels * 2) == (int)(pixels * 2);
+  for (size_t pixel = 0; pixel < pixels; pixel++) {
+    if (rle.remaining == 0) {
+      int header = file.read();
+      if (header < 0) return false;
+      rle.repeat = (header & 0x80) != 0;
+      rle.remaining = (header & 0x7f) + 1;
+      if (rle.repeat) {
+        int hi = file.read(), lo = file.read();
+        if (hi < 0 || lo < 0) return false;
+        rle.hi = hi; rle.lo = lo;
+      }
+    }
+    if (rle.repeat) {
+      output[pixel * 2] = rle.hi; output[pixel * 2 + 1] = rle.lo;
+    } else {
+      int hi = file.read(), lo = file.read();
+      if (hi < 0 || lo < 0) return false;
+      output[pixel * 2] = hi; output[pixel * 2 + 1] = lo;
+    }
+    rle.remaining--;
+  }
+  return true;
+}
+
+bool drawBufferedUiBlob(UsbBlobKind kind, const char *path, bool render) {
+  File file = LittleFS.open(path, "r");
+  if (!file) return false;
+  bool ok = true;
+  bool compressed = kind == USB_STOCK_NAMES_RLE || kind == USB_WEATHER_LABELS_RLE;
+  bool stockBlob = kind == USB_STOCK_NAMES || kind == USB_STOCK_NAMES_RLE;
+  Rle565Reader rle;
+  if (stockBlob) {
+    if (render && effectiveMode() == MODE_STOCK) {
+      tft.fillScreen(TFT_BLACK);
+      stockChromeDrawn = true;
+      stockNamesDrawnRev = stockNamesRev;
+      for (int i = 0; i < MAX_STOCKS; i++) { stockLastCode[i] = "\x01"; stockLastValue[i] = "\x01"; }
+      drawStockScreen(false);
+    }
+    for (int stock = 0; stock < MAX_STOCKS && ok; stock++) {
+      for (int row = 0; row < STOCK_NAME_H; row++) {
+        if (!readUiPixels(file, compressed, rle, (uint8_t *)rowBuf, STOCK_NAME_W)) { ok = false; break; }
+        if (render && effectiveMode() == MODE_STOCK && stock < stockCount)
+          tft.pushImage(70, 6 + stock * 54 + row, STOCK_NAME_W, 1, rowBuf);
+      }
+    }
+  } else {
+    if (render && effectiveMode() == MODE_WEATHER) {
+      tft.fillScreen(TFT_BLACK);
+      weatherChromeDrawn = true;
+      weatherTextDrawnRev = weatherStatus.textRev;
+      weatherLastHour = weatherLastMinute = weatherLastSecond = weatherLastStale = -1;
+      drawWeatherScreen(false);
+    }
+    for (int row = 0; row < WEATHER_HEADER_H && ok; row++) {
+      if (!readUiPixels(file, compressed, rle, (uint8_t *)rowBuf, WEATHER_HEADER_W)) { ok = false; break; }
+      if (render && effectiveMode() == MODE_WEATHER) tft.pushImage(weatherHeaderX(), WEATHER_HEADER_Y + row, WEATHER_HEADER_W, 1, rowBuf);
+    }
+    for (int row = 0; row < WEATHER_DATE_H && ok; row++) {
+      if (!readUiPixels(file, compressed, rle, (uint8_t *)rowBuf, WEATHER_DATE_W)) { ok = false; break; }
+      if (render && effectiveMode() == MODE_WEATHER) tft.pushImage(WEATHER_DATE_X, WEATHER_DATE_Y + row, WEATHER_DATE_W, 1, rowBuf);
+    }
+    for (int row = 0; row < WEATHER_AIR_H && ok; row++) {
+      if (!readUiPixels(file, compressed, rle, (uint8_t *)rowBuf, WEATHER_AIR_W)) { ok = false; break; }
+      if (render && effectiveMode() == MODE_WEATHER) tft.pushImage(WEATHER_AIR_X, WEATHER_AIR_Y + row, WEATHER_AIR_W, 1, rowBuf);
+    }
+    // The centered header bitmap overlaps the icon's left edge with black
+    // background pixels, so repaint the icon after the atomic label swap.
+    if (ok && render && effectiveMode() == MODE_WEATHER) drawWeatherIcon(WEATHER_ICON_X, WEATHER_ICON_Y, weatherStatus.icon);
+  }
+  if (compressed && (rle.remaining != 0 || file.available())) ok = false;
+  file.close();
+  return ok;
+}
+
+bool promoteUiCache(const char *cachePath) {
+  LittleFS.remove(USB_UI_BACKUP_FILE);
+  bool hadCache = LittleFS.exists(cachePath);
+  if (hadCache && !LittleFS.rename(cachePath, USB_UI_BACKUP_FILE)) return false;
+  if (LittleFS.rename(USB_UI_TEMP_FILE, cachePath)) {
+    LittleFS.remove(USB_UI_BACKUP_FILE);
+    return true;
+  }
+  if (hadCache) LittleFS.rename(USB_UI_BACKUP_FILE, cachePath);
+  return false;
+}
+
+void drawStockCachedOrLoading() {
+  if (drawBufferedUiBlob(USB_STOCK_NAMES_RLE, STOCK_UI_CACHE_FILE, true)) return;
+  tft.fillScreen(TFT_BLACK); stockChromeDrawn = true;
+  tft.setTextDatum(TC_DATUM); tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.drawString("Loading stocks...", SCREEN_CX, 108, 2);
+}
+
+void drawWeatherCachedOrLoading() {
+  if (drawBufferedUiBlob(USB_WEATHER_LABELS_RLE, WEATHER_UI_CACHE_FILE, true)) return;
+  tft.fillScreen(TFT_BLACK); weatherChromeDrawn = true;
+  tft.setTextDatum(TC_DATUM); tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.drawString("Loading weather...", SCREEN_CX, 108, 2);
+}
+
+void finishUsbBlob(uint16_t transfer) {
+  if (!usbBlob.active || transfer != usbBlob.transfer) {
+    sendBinaryAck(transfer, usbBlob.nextSeq, "end", false);
+    return;
+  }
+  if (usbBlob.file) usbBlob.file.close();
+  const char *reason = "";
+  bool ok = usbBlob.received == usbBlob.expectedSize;
+  if (!ok) reason = "size";
+  if (ok && (usbBlob.crc ^ 0xffffffff) != usbBlob.expectedCrc) { ok = false; reason = "crc"; }
+  if (ok && usbBlob.rowFill != 0) { ok = false; reason = "row"; }
+  bool uiBlob = usbBlob.kind == USB_STOCK_NAMES || usbBlob.kind == USB_STOCK_NAMES_RLE
+    || usbBlob.kind == USB_WEATHER_LABELS || usbBlob.kind == USB_WEATHER_LABELS_RLE;
+  if (ok && uiBlob) {
+    ok = drawBufferedUiBlob(usbBlob.kind, USB_UI_TEMP_FILE, false);
+    if (!ok) reason = "decode";
+    bool cacheable = usbBlob.kind == USB_STOCK_NAMES_RLE || usbBlob.kind == USB_WEATHER_LABELS_RLE;
+    const char *cachePath = usbBlob.kind == USB_STOCK_NAMES_RLE ? STOCK_UI_CACHE_FILE : WEATHER_UI_CACHE_FILE;
+    if (ok && cacheable && !promoteUiCache(cachePath)) { ok = false; reason = "cache"; }
+    if (ok && cacheable) ok = drawBufferedUiBlob(usbBlob.kind, cachePath, true);
+    else if (ok) ok = drawBufferedUiBlob(usbBlob.kind, USB_UI_TEMP_FILE, true);
+    if (!ok && !reason[0]) reason = "draw";
+    LittleFS.remove(USB_UI_TEMP_FILE);
+  } else if (uiBlob) {
+    LittleFS.remove(USB_UI_TEMP_FILE);
+  }
+  if (ok && (usbBlob.kind == USB_GIF_CLAUDE || usbBlob.kind == USB_GIF_CODEX)) {
+    ActiveApp slot = usbBlob.kind == USB_GIF_CLAUDE ? APP_CLAUDE : APP_CODEX;
+    const char *gifPath = slot == APP_CLAUDE ? CLAUDE_GIF_FILE : CODEX_GIF_FILE;
+    const char *binPath = slot == APP_CLAUDE ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE;
+    int tw = slot == APP_CLAUDE ? CLAUDE_SPRITE_W : CODEX_SPRITE_W;
+    int th = slot == APP_CLAUDE ? CLAUDE_SPRITE_H : CODEX_SPRITE_H;
+    ok = decodeGifToBin(gifPath, binPath, tw, th);
+    if (!ok) reason = "decode";
+    LittleFS.remove(gifPath);
+    if (ok) {
+      spriteRev++;
+      loadCustomSpriteState();
+      if (slot == APP_CLAUDE) claudeFrame = 0; else codexFrame = 0;
+      if (currentApp == slot) drawActiveApp();
+    }
+  }
+  uint16_t seq = usbBlob.nextSeq;
+  cancelUsbBlob();
+  sendBinaryAck(transfer, seq, "end", ok, reason);
+}
+
+void writeUsbBinaryFrame(uint16_t transfer, uint16_t seq, const uint8_t *payload, uint16_t length) {
+  uint8_t frame[524], encoded[528];
+  frame[0] = 1; frame[1] = 1;
+  frame[2] = transfer; frame[3] = transfer >> 8;
+  frame[4] = seq; frame[5] = seq >> 8;
+  frame[6] = length; frame[7] = length >> 8;
+  memcpy(frame + 8, payload, length);
+  uint32_t crc = crc32Update(0xffffffff, frame, 8 + length) ^ 0xffffffff;
+  frame[8 + length] = crc; frame[9 + length] = crc >> 8;
+  frame[10 + length] = crc >> 16; frame[11 + length] = crc >> 24;
+  size_t encodedLen = cobsEncode(frame, 12 + length, encoded, sizeof(encoded));
+  if (!encodedLen) return;
+  Serial.write((uint8_t)0);
+  Serial.write(encoded, encodedLen);
+  Serial.write((uint8_t)0);
+}
+
+uint8_t builtinSpriteByte(ActiveApp slot, size_t offset) {
+  int frames = slot == APP_CLAUDE ? CLAUDE_SPRITE_FRAMES : CODEX_SPRITE_FRAMES;
+  if (offset == 0) return (uint8_t)frames;
+  int w = slot == APP_CLAUDE ? CLAUDE_SPRITE_W : CODEX_SPRITE_W;
+  int h = slot == APP_CLAUDE ? CLAUDE_SPRITE_H : CODEX_SPRITE_H;
+  size_t frameBytes = (size_t)w * h * 2;
+  size_t pixelOffset = offset - 1;
+  int frame = pixelOffset / frameBytes;
+  size_t within = pixelOffset % frameBytes;
+  const uint16_t *const *arr = slot == APP_CLAUDE ? claude_sprite_frames : codex_sprite_frames;
+  return pgm_read_byte(((const uint8_t *)arr[frame]) + within);
+}
+
+void sendSpriteUsb(ActiveApp slot, uint16_t transfer) {
+  bool custom = slot == APP_CLAUDE ? claudeCustom : codexCustom;
+  const char *path = slot == APP_CLAUDE ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE;
+  int w = slot == APP_CLAUDE ? CLAUDE_SPRITE_W : CODEX_SPRITE_W;
+  int h = slot == APP_CLAUDE ? CLAUDE_SPRITE_H : CODEX_SPRITE_H;
+  int frames = slot == APP_CLAUDE ? claudeFrameCount() : codexFrameCount();
+  size_t size = 1 + (size_t)frames * w * h * 2;
+  uint32_t crc = 0xffffffff;
+  File file;
+  uint8_t buf[512];
+  if (custom) {
+    file = LittleFS.open(path, "r");
+    if (!file) return;
+    size = file.size();
+    while (file.available()) {
+      int n = file.read(buf, sizeof(buf));
+      if (n > 0) crc = crc32Update(crc, buf, n);
+    }
+    file.seek(0);
+  } else {
+    for (size_t offset = 0; offset < size; offset++) {
+      uint8_t value = builtinSpriteByte(slot, offset);
+      crc = crc32Update(crc, &value, 1);
+    }
+  }
+  crc ^= 0xffffffff;
+
+  JsonDocument begin;
+  begin["type"] = "binary_begin"; begin["version"] = 1;
+  begin["direction"] = "device"; begin["kind"] = "sprite";
+  begin["transfer"] = transfer; begin["size"] = size; begin["crc32"] = crc;
+  Serial.print(USB_FRAME_PREFIX); serializeJson(begin, Serial); Serial.println();
+
+  uint16_t seq = 0;
+  for (size_t offset = 0; offset < size; offset += sizeof(buf), seq++) {
+    int n = min((size_t)sizeof(buf), size - offset);
+    if (custom) n = file.read(buf, n);
+    else for (int i = 0; i < n; i++) buf[i] = builtinSpriteByte(slot, offset + i);
+    if (n <= 0) break;
+    writeUsbBinaryFrame(transfer, seq, buf, n);
+    yield();
+  }
+  if (file) file.close();
+  JsonDocument end;
+  end["type"] = "binary_end"; end["version"] = 1;
+  end["direction"] = "device"; end["transfer"] = transfer;
+  Serial.print(USB_FRAME_PREFIX); serializeJson(end, Serial); Serial.println();
+}
+
+void applyUsbDisplayMode(const String &mode) {
+  if (mode == "auto") displayMode = MODE_AUTO;
+  else if (mode == "claude") displayMode = MODE_CLAUDE;
+  else if (mode == "codex") displayMode = MODE_CODEX;
+  else if (mode == "dual") displayMode = MODE_DUAL;
+  else if (mode == "domestic") displayMode = MODE_DOMESTIC;
+  else if (mode == "net") displayMode = MODE_NET;
+  else if (mode == "music") displayMode = MODE_MUSIC;
+  else if (mode == "stock") displayMode = MODE_STOCK;
+  else if (mode == "weather") displayMode = MODE_WEATHER;
+  else return;
+  lastEffectiveMode = effectiveMode();
+  if (displayMode == MODE_NET) {
+    netChromeDrawn = false;
+    lastNetPollMs = 0;
+  } else if (displayMode == MODE_MUSIC) {
+    musicChromeDrawn = false;
+    lastMusicPollMs = 0;
+  } else if (displayMode == MODE_DUAL) {
+    drawDualScreen(true);
+  } else if (displayMode == MODE_DOMESTIC) {
+    drawDomesticScreen(true);
+  } else if (displayMode == MODE_STOCK) {
+    drawStockCachedOrLoading();
+  } else if (displayMode == MODE_WEATHER) {
+    drawWeatherCachedOrLoading();
+  } else {
+    updateActiveApp();
+    drawActiveApp();
+  }
+  sendUsbFrame("info", deviceInfoJson());
+}
+
+void handleUsbFrame(const String &json) {
+  JsonDocument doc;
+  if (deserializeJson(doc, json)) return;
+  if ((int)(doc["version"] | 0) != 1) return;
+  lastUsbStatusMs = millis();
+  everUsbStatus = true;
+  String type = doc["type"] | "";
+  if (type == "hello") {
+    lastUsbStatusMs = millis();
+    everUsbStatus = true;
+    sendUsbFrame("hello_ack");
+    return;
+  }
+  if (type == "get_info") {
+    sendUsbFrame("info", deviceInfoJson());
+    return;
+  }
+  if (type == "status") {
+    String payload;
+    serializeJson(doc["data"], payload);
+    if (parseStatusJson(payload)) {
+      lastUsbStatusMs = millis();
+      everUsbStatus = true;
+      lastSuccessMs = millis();
+      everPolled = true;
+      DisplayMode eff = effectiveMode();
+      if (eff == MODE_DOMESTIC) {
+        drawDomesticScreen();
+      } else if (eff == MODE_DUAL) {
+        drawDualScreen();
+      } else if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK && eff != MODE_WEATHER) {
+        if (updateActiveApp()) drawActiveApp();
+        else refreshActiveApp();
+      }
+      sendUsbFrame("status_ack");
+    }
+    return;
+  }
+  if (type == "binary_begin") {
+    beginUsbBlob(doc);
+    return;
+  }
+  if (type == "binary_end") {
+    finishUsbBlob(doc["transfer"] | 0);
+    return;
+  }
+  if (type == "get_sprite_usb") {
+    String slot = doc["slot"] | "";
+    uint16_t transfer = doc["transfer"] | 0;
+    if (slot == "claude") sendSpriteUsb(APP_CLAUDE, transfer);
+    else if (slot == "codex") sendSpriteUsb(APP_CODEX, transfer);
+    return;
+  }
+  if (type == "reset_sprite") {
+    String slotName = doc["slot"] | "";
+    ActiveApp slot = slotName == "claude" ? APP_CLAUDE : APP_CODEX;
+    const char *binPath = slot == APP_CLAUDE ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE;
+    LittleFS.remove(binPath);
+    spriteRev++;
+    loadCustomSpriteState();
+    if (slot == APP_CLAUDE) claudeFrame = 0; else codexFrame = 0;
+    if (currentApp == slot) drawActiveApp();
+    sendUsbFrame("info", deviceInfoJson());
+    return;
+  }
+  if (type == "net" && !doc["data"].isNull()) {
+    applyNetJson(doc["data"].as<JsonObject>());
+    return;
+  }
+  if (type == "music" && !doc["data"].isNull()) {
+    applyMusicJson(doc["data"].as<JsonObject>());
+    return;
+  }
+  if (type == "stock" && !doc["data"].isNull()) {
+    applyStockJson(doc["data"].as<JsonObject>());
+    if (effectiveMode() == MODE_STOCK) drawStockScreen();
+    return;
+  }
+  if (type == "weather" && !doc["data"].isNull()) {
+    applyWeatherJson(doc["data"].as<JsonObject>());
+    return;
+  }
+  if (type == "set_display") {
+    applyUsbDisplayMode(doc["mode"] | "");
+    return;
+  }
+  if (type == "set_brightness") {
+    int level = doc["level"] | brightness;
+    brightness = constrain(level, 0, 100);
+    applyBrightness();
+    saveBrightness();
+    sendUsbFrame("info", deviceInfoJson());
+  }
+}
+
+void handleUsbSerial() {
+  static String line;
+  static bool binary = false;
+  static uint8_t encoded[528];
+  static size_t encodedLen = 0;
+  while (Serial.available()) {
+    uint8_t value = (uint8_t)Serial.read();
+    if (value == 0) {
+      if (binary) {
+        if (encodedLen) {
+          handleUsbBinaryFrame(encoded, encodedLen);
+          yield();
+        }
+        encodedLen = 0;
+        binary = false;
+      } else {
+        line = "";
+        binary = true;
+      }
+      continue;
+    }
+    if (binary) {
+      if (encodedLen < sizeof(encoded)) encoded[encodedLen++] = value;
+      else { encodedLen = 0; binary = false; }
+      continue;
+    }
+    char ch = (char)value;
+    if (ch == '\n') {
+      line.trim();
+      if (line.startsWith(USB_FRAME_PREFIX)) {
+        handleUsbFrame(line.substring(strlen(USB_FRAME_PREFIX)));
+      }
+      line = "";
+    } else if (ch != '\r') {
+      if (line.length() < 2048) line += ch;
+      else line = "";
+    }
+  }
 }
 
 void handleApiBridge() {
@@ -1585,10 +3149,61 @@ void setupWebServer() {
   Serial.printf("[web] admin server listening on http://%s/\n", WiFi.localIP().toString().c_str());
 }
 
+void serviceWiFi() {
+  unsigned long nowMs = millis();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiDisconnectedSinceMs = 0;
+    if (wifiPortalActive) {
+      wifiManager.stopConfigPortal();
+      wifiPortalActive = false;
+    }
+    if (!webServerStarted) {
+      setupWebServer();
+      webServerStarted = true;
+      Serial.printf("[wifi] connected ssid=%s ip=%s\n", WiFi.SSID().c_str(),
+                    WiFi.localIP().toString().c_str());
+    }
+    webServer.handleClient();
+    return;
+  }
+
+  if (wifiDisconnectedSinceMs == 0) wifiDisconnectedSinceMs = nowMs;
+
+  if (wifiPortalActive && usbBridgeActive()) {
+    Serial.println("[wifi] USB connected; stopping config portal");
+    wifiManager.stopConfigPortal();
+    wifiPortalActive = false;
+    WiFi.mode(WIFI_STA);
+    WiFi.begin();
+    lastWifiRetryMs = nowMs;
+    drawStaticChrome();
+    drawActiveApp();
+  }
+
+  // A USB-connected clock must remain fully usable without WiFi. Only expose
+  // the provisioning screen when neither transport is available.
+  if (!wifiPortalActive && !usbBridgeActive() &&
+      nowMs - wifiDisconnectedSinceMs >= WIFI_PORTAL_DELAY_MS) {
+    Serial.println("[wifi] no USB or WiFi; starting non-blocking config portal");
+    wifiManager.startConfigPortal(WIFI_PORTAL_AP_NAME);
+    wifiPortalActive = true;
+  }
+
+  if (wifiPortalActive) {
+    wifiManager.process();
+  } else if (nowMs - lastWifiRetryMs >= WIFI_RETRY_INTERVAL_MS) {
+    lastWifiRetryMs = nowMs;
+    Serial.println("[wifi] retrying saved network in background");
+    WiFi.begin();
+  }
+}
+
 // ---------- Arduino entry points ----------
 
 void setup() {
-  Serial.begin(115200);
+  Serial.setRxBufferSize(1024);
+  Serial.begin(460800);
   LittleFS.begin();
   loadBridgeHost();
   loadBrightness();
@@ -1601,25 +3216,16 @@ void setup() {
   analogWriteRange(100); // duty maps 1:1 to a 0-100 percentage
   applyBrightness();
 
-  setupWiFi();
-  setupWebServer();
-
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("WiFi connected", 8, 70, 2);
-  tft.drawString("Admin page:", 8, 100, 2);
-  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString("http://" + WiFi.localIP().toString(), 8, 125, 2);
-  delay(3000);
-
+  sendUsbFrame("hello");
   drawStaticChrome();
   drawActiveApp();
+  setupWiFi();
   pollBridge();
 }
 
 void loop() {
-  webServer.handleClient();
+  handleUsbSerial();
+  serviceWiFi();
   unsigned long nowMs = millis();
 
   // Effective mode may differ from the configured one (AUTO -> music while
@@ -1634,6 +3240,16 @@ void loop() {
     } else if (eff == MODE_MUSIC) {
       musicChromeDrawn = false;
       lastMusicPollMs = 0;
+    } else if (eff == MODE_DUAL) {
+      drawDualScreen(true);
+    } else if (eff == MODE_DOMESTIC) {
+      drawDomesticScreen(true);
+    } else if (eff == MODE_STOCK) {
+      lastStockPollMs = 0;
+      drawStockCachedOrLoading();
+    } else if (eff == MODE_WEATHER) {
+      lastWeatherPollMs = 0;
+      drawWeatherCachedOrLoading();
     } else {
       updateActiveApp();
       drawActiveApp();
@@ -1656,6 +3272,38 @@ void loop() {
     if (nowMs - lastMusicPollMs >= MUSIC_POLL_INTERVAL_MS) {
       lastMusicPollMs = nowMs;
       pollMusic();
+    }
+  } else if (eff == MODE_DUAL) {
+    // Static page; incoming status frames repaint only changed quota sections.
+  } else if (eff == MODE_DOMESTIC) {
+    if (nowMs - lastFlashMs >= FLASH_INTERVAL_MS) {
+      lastFlashMs = nowMs;
+      flashOn = !flashOn;
+      if (domesticStatus.needsInput && flashOn) drawFullBorder(TFT_RED);
+      else if (domesticStatus.needsInput) drawDomesticScreen(true);
+    }
+  } else if (eff == MODE_STOCK) {
+    if (usbBlob.active && (usbBlob.kind == USB_STOCK_NAMES || usbBlob.kind == USB_STOCK_NAMES_RLE)) return;
+    if (nowMs - lastStockPollMs >= STOCK_POLL_INTERVAL_MS) {
+      lastStockPollMs = nowMs;
+      pollStock();
+    }
+    if (!stockChromeDrawn || stockDirty) drawStockScreen();
+  } else if (eff == MODE_WEATHER) {
+    if (usbBlob.active && (usbBlob.kind == USB_WEATHER_LABELS || usbBlob.kind == USB_WEATHER_LABELS_RLE)) return;
+    if (nowMs - lastWeatherPollMs >= WEATHER_POLL_INTERVAL_MS) {
+      lastWeatherPollMs = nowMs;
+      pollWeather();
+    }
+    if (!weatherChromeDrawn) drawWeatherScreen(true);
+    if (nowMs - lastWeatherClockMs >= 1000) {
+      lastWeatherClockMs = nowMs;
+      drawWeatherClock();
+    }
+    if (nowMs - lastWeatherAnimMs >= 350) {
+      lastWeatherAnimMs = nowMs;
+      weatherAnimFrame++;
+      drawWeatherAnimation();
     }
   } else {
     // sprite walk-cycle animation (only advances while that app is showing)

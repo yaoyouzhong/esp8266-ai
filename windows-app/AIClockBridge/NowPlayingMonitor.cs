@@ -69,6 +69,11 @@ sealed class NowPlayingMonitor
         get { lock (_lock) return _textRgb565; }
     }
 
+    public int TextRev
+    {
+        get { lock (_lock) return _textRev; }
+    }
+
     public void Start()
     {
         _ = Poll();
@@ -204,7 +209,8 @@ sealed class NowPlayingMonitor
                 Duration = Math.Max(0, duration),
                 UpdatedAt = DateTime.UtcNow,
             };
-            next.Playing = playing && next.Title.Length > 0;
+            next.Playing = playing && next.Title.Length > 0
+                && !StalledAtEnd(next.Elapsed, next.Duration);
 
             byte[] artworkData = null;
             if (props?.Thumbnail != null)
@@ -314,9 +320,15 @@ sealed class NowPlayingMonitor
         {
             s.Elapsed = Math.Clamp(
                 s.Elapsed + (DateTime.UtcNow - s.UpdatedAt).TotalSeconds, 0, s.Duration);
+            if (StalledAtEnd(s.Elapsed, s.Duration)) s.Playing = false;
         }
         return s;
     }
+
+    // Some players leave WinRT's playback status at Playing after the final
+    // frame. A real track advances instead of remaining pinned at its endpoint.
+    static bool StalledAtEnd(double elapsed, double duration) =>
+        duration > 0 && elapsed >= duration - 0.5;
 
     /// Decode artwork bytes, aspect-fill onto a black 128x128, RGB565-encode.
     static byte[] MakeCoverRgb565(byte[] data, int w, int h)
