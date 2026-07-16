@@ -217,7 +217,7 @@ sealed class WeatherMonitor
             _ => Color.Red,
         };
         graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-        using var font = new Font("Microsoft YaHei UI", air.Length > 1 ? 10f : 15f,
+        using var font = new Font("Microsoft YaHei UI", air.Length > 1 ? 12f : 18f,
                                   FontStyle.Bold, GraphicsUnit.Pixel);
         using var brush = new SolidBrush(color);
         using var format = new StringFormat
@@ -245,6 +245,7 @@ sealed class WeatherMonitor
                 && (string.Equals(cached.ConfiguredCity, configuredCity, StringComparison.OrdinalIgnoreCase)
                     || string.Equals(cached.City, configuredCity, StringComparison.OrdinalIgnoreCase)))
             {
+                if (cached.Condition == "毛毛雨") cached.Condition = "细雨";
                 cached.Stale = true;
                 lock (_lock) _snapshot = cached;
                 RenderText(cached);
@@ -276,7 +277,7 @@ sealed class WeatherMonitor
     static string ConditionFor(int code) => code switch
     {
         0 => "晴", 1 or 2 => "少云", 3 => "阴", 45 or 48 => "雾",
-        >= 51 and <= 57 => "毛毛雨", >= 61 and <= 67 => "小雨",
+        >= 51 and <= 57 => "细雨", >= 61 and <= 67 => "小雨",
         >= 71 and <= 77 => "雪", >= 80 and <= 82 => "阵雨", _ => "雷雨",
     };
 }

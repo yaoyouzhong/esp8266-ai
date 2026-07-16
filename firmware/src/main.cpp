@@ -190,11 +190,9 @@ const int WEATHER_AIR_W = 42, WEATHER_AIR_H = 30;
 const int WEATHER_CONTENT_LEFT = 14;
 const int WEATHER_HEADER_Y = 1;
 const int WEATHER_DATE_X = WEATHER_CONTENT_LEFT, WEATHER_DATE_Y = 117;
-// Centre the air-quality badge in the visual gap between the header text and
-// the weather icon. 132 placed its centre noticeably too far to the right.
-// Keep the badge on the right side of the high/low row. It must not share
-// horizontal space with longer header text such as "南京 毛毛雨".
-const int WEATHER_AIR_X = 148, WEATHER_AIR_Y = 22;
+// Centre the air-quality badge between the city/range block and weather icon.
+// A four-character city plus a two-character condition still leaves a clear gap.
+const int WEATHER_AIR_X = 136, WEATHER_AIR_Y = 12;
 const int WEATHER_ICON_X = 202, WEATHER_ICON_Y = 27;
 const int WEATHER_ANIM_BOTTOM = 224;
 struct WeatherStatus {

@@ -505,9 +505,9 @@ sealed class MirrorControl : Control
         g.DrawString($"{w.City} {w.Condition}", headerFont, Brushes.White, new RectangleF(14, 1, 130, 26));
         g.DrawString($"L {(int)Math.Round(w.Low)}C", rangeFont, Brushes.Cyan, 20, 34);
         g.DrawString($"H {(int)Math.Round(w.High)}C", rangeFont, Brushes.Orange, 81, 34);
-        using (var badgeFont = new Font("Microsoft YaHei UI", w.AirQuality.Length > 1 ? 10 : 15, FontStyle.Bold, GraphicsUnit.Pixel))
+        using (var badgeFont = new Font("Microsoft YaHei UI", w.AirQuality.Length > 1 ? 12 : 18, FontStyle.Bold, GraphicsUnit.Pixel))
         using (var badgeFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-            g.DrawString(w.AirQuality, badgeFont, Brushes.Gold, new RectangleF(148, 22, 42, 30), badgeFormat);
+            g.DrawString(w.AirQuality, badgeFont, Brushes.Gold, new RectangleF(136, 12, 42, 30), badgeFormat);
         using (var iconFont = new Font("Segoe UI Symbol", 28, FontStyle.Regular, GraphicsUnit.Pixel))
             g.DrawString(w.Icon <= 1 ? "☀" : "☁", iconFont, Brushes.Yellow, 190, 18);
 
