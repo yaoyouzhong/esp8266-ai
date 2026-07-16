@@ -517,9 +517,14 @@ sealed class SerialBridge : IDisposable
         // visibly appeared well before stock/weather Chinese labels.
         if (mode == "stock" && _stocks != null) SendRaw("stock", _stocks.ToJson());
         if (mode == "weather" && _weather != null) SendRaw("weather", _weather.ToJson());
-        if (_deviceInfo != null) _deviceInfo.Mode = mode;
+        if (_deviceInfo != null) _deviceInfo.Mode = mode == "screensaver_preview" ? "screensaver" : mode;
         if (mode == "music") { _lastTextRev = -1; _lastArtworkRev = -1; }
         Send("set_display", new() { ["mode"] = mode });
+        if (mode == "net")
+        {
+            _lastNetAt = DateTime.UtcNow;
+            SendRaw("net", _net.ToJson());
+        }
         if (mode == "music") _ = PushMusicImagesOnce();
         if (mode == "stock" || mode == "weather") _ = PushVisualImagesOnce(mode);
     }

@@ -36,6 +36,7 @@ class CodexStatus
     public int? WeeklyWindowMin;
     public int? WeeklyResetMin;
     public bool NeedsInput;
+    public long CompletionAt; // Unix seconds of the latest explicit Stop event
 }
 
 class DomesticProviderStatus
@@ -78,6 +79,8 @@ class StatusSnapshot
         {
             w.WriteStartObject();
             w.WriteNumber("ts", Ts);
+            w.WriteNumber("local_utc_offset_s", (int)TimeZoneInfo.Local
+                .GetUtcOffset(DateTimeOffset.FromUnixTimeSeconds(Ts)).TotalSeconds);
             w.WriteBoolean("music_playing", MusicPlaying);
             w.WriteStartObject("claude");
             w.WriteString("plan", Claude.Plan);
@@ -102,6 +105,7 @@ class StatusSnapshot
             WriteNullable(w, "weekly_window_min", Codex.WeeklyWindowMin);
             WriteNullable(w, "weekly_reset_min", Codex.WeeklyResetMin);
             w.WriteBoolean("needs_input", Codex.NeedsInput);
+            w.WriteNumber("completion_at", Codex.CompletionAt);
             w.WriteEndObject();
             w.WriteStartObject("domestic");
             w.WriteString("status", Domestic.Status);
@@ -222,6 +226,7 @@ sealed class StatusService
     // event (the prompt got answered) or by TTL.
     double? _claudeNeedsInputAt;
     double? _codexNeedsInputAt;
+    long _codexCompletionAt;
     const double WorkingEventTTL = 10 * 60;
     const double IdleEventTTL = 60;
     const double NeedsInputTTL = 5 * 60;
@@ -251,6 +256,8 @@ sealed class StatusService
         lock (_lock)
         {
             var now = Now();
+            if (agent == "codex" && ev == "Stop")
+                _codexCompletionAt = (long)now;
             // Claude Notification: flash only for permission prompts, not for
             // "task done / waiting for your input" notifications.
             if (ev == "Notification")
@@ -391,6 +398,7 @@ sealed class StatusService
             }
             snap.Codex.Status = OverrideStatus(snap.Codex.Status, _codexEvent, now);
             snap.Codex.NeedsInput = NeedsInput(_codexNeedsInputAt, now);
+            snap.Codex.CompletionAt = _codexCompletionAt;
             snap.MusicPlaying = MusicPlayingProvider?.Invoke() ?? false;
             return snap;
         }

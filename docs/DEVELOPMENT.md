@@ -204,7 +204,7 @@ pio device monitor -b 460800
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/info` | 设备状态 JSON：ip/ssid/bridge/配置模式/实际显示/自定义精灵和天气/股票页面缓存标记 |
-| POST | `/api/display` | `mode=auto\|claude\|codex\|dual\|domestic\|net\|music\|stock\|weather` 切换屏幕显示 |
+| POST | `/api/display` | `mode=auto\|claude\|codex\|dual\|domestic\|net\|music\|stock\|weather\|screensaver` 切换屏幕显示；Windows 立即预览内部使用 `screensaver_preview`，设备信息仍归一化为 `screensaver` |
 | POST | `/api/bridge` | `host=ip:port` 设置桥接地址 |
 | POST | `/api/brightness` | `level=0..100` 设置并持久化背光亮度 |
 | POST | `/sprite/claude`、`/sprite/codex` | multipart 上传 GIF 并板上解码替换 |
@@ -332,6 +332,22 @@ Windows 会把股票名称和天气三块中文位图合并成 RLE 页面缓存�
 阿里云登录使用 `%APPDATA%\AIClockBridge\quota-auth-profile` 的独立 WebView2 profile。
 登录成功后把会话 Cookie 持久化 30 天，每次成功读取额度自动续期；Cookie 值不写入额度
 JSON 缓存或日志。供应商主动撤销会话时仍需重新登录。
+
+## 10. Windows 自动屏保
+
+Windows 每秒通过 `GetLastInputInfo` 读取系统键鼠空闲时间，超时配置保存在
+`%APPDATA%\AIClockBridge\settings.json`。进入屏保前记录设备原显示模式并暂停循环计时器，
+退出时恢复原模式和循环；屏保本身是协议中的 `screensaver` 显示模式，USB 与 HTTP 路径一致。
+
+固件使用 `/status` 的 `ts` 和 `local_utc_offset_s` 校准本地时间，在黑底上绘制七段液晶
+`HH:mm`、日期和内置中文字模星期；画面每 5 秒移动刷新一次。键鼠恢复时 Windows 退出屏保并恢复原模式；模型 working 或审批状态
+由固件 `effectiveMode()` 临时覆盖屏保，事件结束后仍回到屏保。AUTO 模式开始播放音乐时
+恢复正常 AUTO 页面。屏保不修改持久化亮度。
+
+「立即预览」通过 `screensaver_preview` 强制保持屏保画面，5 秒内忽略 working 状态和键鼠输入，
+到时由 Windows 主动恢复原页面。审批提醒具有全局优先级，即使固定在股票、天气
+等页面也会切到对应桌宠并闪烁红色边框。Codex 只有收到明确的 `Stop` hook 才触发完成提醒：
+绿色边框脉冲并播放约 2.4 秒桌宠动画，随后自动恢复进入提醒前的固定页面。
 
 ## 已知限制 / TODO
 

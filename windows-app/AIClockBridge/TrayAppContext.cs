@@ -12,6 +12,8 @@ sealed class TrayAppContext : ApplicationContext
     const string CycleEnabledKey = "display_cycle_enabled";
     const string CyclePagesKey = "display_cycle_pages";
     const string CycleIntervalKey = "display_cycle_interval_seconds";
+    const string ScreenSaverTimeoutKey = "screensaver_timeout_minutes";
+    const string ScreenSaverPreviousModeKey = "screensaver_previous_mode";
     static readonly (string Title, string Mode)[] DisplayModes =
     {
         ("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
@@ -30,6 +32,7 @@ sealed class TrayAppContext : ApplicationContext
     readonly StatusService _service;
     readonly UsageFetcher _usage;
     readonly DomesticQuotaService _domesticUsage;
+    readonly NowPlayingMonitor _nowPlaying;
     readonly StockMonitor _stocks;
     readonly WeatherMonitor _weather;
     readonly int _port;
@@ -45,11 +48,22 @@ sealed class TrayAppContext : ApplicationContext
     readonly Dictionary<string, ToolStripMenuItem> _cyclePageItems = new();
     readonly Dictionary<int, ToolStripMenuItem> _cycleIntervalItems = new();
     readonly System.Windows.Forms.Timer _cycleTimer = new();
+    readonly System.Windows.Forms.Timer _screenSaverTimer = new() { Interval = 1000 };
+    readonly Dictionary<int, ToolStripMenuItem> _screenSaverTimeoutItems = new();
+    ToolStripMenuItem _screenSaverMenu;
     bool _cycleEnabled;
     bool _cycleBusy;
     bool _keepMenuOpen;
     int _cycleIntervalSeconds;
     int _cycleIndex = -1;
+    int _screenSaverTimeoutMinutes;
+    bool _screenSaverActive;
+    bool _screenSaverBusy;
+    bool _screenSaverPreviewActive;
+    string _modeBeforeScreenSaver = "auto";
+    string _lastKnownMode = "auto";
+    DateTime _lastScreenSaverActivityAt = DateTime.UtcNow;
+    DateTime _ignoreScreenSaverWakeUntil = DateTime.MinValue;
 
     public TrayAppContext(StatusService service, UsageFetcher usage, DomesticQuotaService domesticUsage,
                           NetSpeedMonitor netMonitor,
@@ -58,13 +72,16 @@ sealed class TrayAppContext : ApplicationContext
         _service = service;
         _usage = usage;
         _domesticUsage = domesticUsage;
+        _nowPlaying = nowPlaying;
         _stocks = stocks;
         _weather = weather;
         _port = port;
         _mirror = new MirrorForm(service, netMonitor, nowPlaying, stocks, weather);
 
         LoadCycleSettings();
+        LoadScreenSaverSettings();
         _cycleTimer.Tick += async (_, _) => await AdvanceCycle();
+        _screenSaverTimer.Tick += async (_, _) => await ScreenSaverTick();
 
         BuildMenu();
         _trayIcon = new NotifyIcon
@@ -91,6 +108,8 @@ sealed class TrayAppContext : ApplicationContext
             _cycleTimer.Start();
             _ = AdvanceCycle();
         }
+        _screenSaverTimer.Start();
+        _ = RecoverScreenSaverState();
     }
 
     /// User-supplied device logo (bezel + dark screen + smiley + green status
@@ -136,7 +155,26 @@ sealed class TrayAppContext : ApplicationContext
             _modeItems[mode] = item;
             displayMenu.DropDownItems.Add(item);
         }
+        displayMenu.DropDownItems.Add(new ToolStripSeparator());
+        _screenSaverMenu = new ToolStripMenuItem();
+        foreach (var (title, minutes) in new[]
+        {
+            ("关闭", 0), ("1 分钟", 1), ("5 分钟", 5), ("10 分钟", 10),
+            ("30 分钟", 30), ("60 分钟", 60),
+        })
+        {
+            var item = new ToolStripMenuItem(title);
+            item.Click += async (_, _) => await SetScreenSaverTimeout(minutes);
+            KeepOpenOnClick(item);
+            _screenSaverTimeoutItems[minutes] = item;
+            _screenSaverMenu.DropDownItems.Add(item);
+        }
+        _screenSaverMenu.DropDownItems.Add(new ToolStripSeparator());
+        _screenSaverMenu.DropDownItems.Add(MakeItem("立即预览", async (_, _) => await EnterScreenSaver(preview: true)));
+        KeepOpenWhileSetting(_screenSaverMenu.DropDown);
+        displayMenu.DropDownItems.Add(_screenSaverMenu);
         _menu.Items.Add(displayMenu);
+        UpdateScreenSaverMenu();
 
         var cycleMenu = new ToolStripMenuItem("循环展示");
         _cycleEnabledItem.Click += async (_, _) => await SetCycleEnabled(!_cycleEnabled, restoreAuto: true);
@@ -278,6 +316,136 @@ sealed class TrayAppContext : ApplicationContext
         _cycleTimer.Interval = _cycleIntervalSeconds * 1000;
     }
 
+    void LoadScreenSaverSettings()
+    {
+        _screenSaverTimeoutMinutes = int.TryParse(Settings.Get(ScreenSaverTimeoutKey), out var minutes)
+            && new[] { 0, 1, 5, 10, 30, 60 }.Contains(minutes) ? minutes : 0;
+        var previous = Settings.Get(ScreenSaverPreviousModeKey);
+        if (previous.Length > 0 && previous != "screensaver") _modeBeforeScreenSaver = previous;
+    }
+
+    void UpdateScreenSaverMenu()
+    {
+        if (_screenSaverMenu == null) return;
+        _screenSaverMenu.Text = _screenSaverTimeoutMinutes == 0
+            ? "屏保设置：已关闭" : $"屏保设置：{_screenSaverTimeoutMinutes} 分钟";
+        foreach (var (minutes, item) in _screenSaverTimeoutItems)
+            item.Checked = minutes == _screenSaverTimeoutMinutes;
+    }
+
+    async Task SetScreenSaverTimeout(int minutes)
+    {
+        _screenSaverTimeoutMinutes = minutes;
+        Settings.Set(ScreenSaverTimeoutKey, minutes.ToString());
+        _lastScreenSaverActivityAt = DateTime.UtcNow;
+        UpdateScreenSaverMenu();
+        if (minutes == 0 && _screenSaverActive) await ExitScreenSaver();
+    }
+
+    bool HasModelActivity()
+    {
+        var snap = _service.Snapshot();
+        return snap.Claude.NeedsInput || snap.Codex.NeedsInput || snap.Domestic.NeedsInput
+            || snap.Claude.Status == "working" || snap.Codex.Status == "working"
+            || snap.Domestic.Status == "working";
+    }
+
+    bool ShouldWakeForMusic() => (_screenSaverActive ? _modeBeforeScreenSaver : _lastKnownMode) == "auto"
+        && _nowPlaying.Snapshot.Playing;
+
+    async Task ScreenSaverTick()
+    {
+        if (_screenSaverBusy) return;
+        var now = DateTime.UtcNow;
+        var systemIdle = SystemIdleTime.Current;
+        var modelActivity = HasModelActivity();
+        var musicWake = ShouldWakeForMusic();
+        var important = modelActivity || musicWake;
+        if (important || systemIdle < TimeSpan.FromSeconds(2)) _lastScreenSaverActivityAt = now;
+
+        if (_screenSaverActive)
+        {
+            if (_screenSaverPreviewActive)
+            {
+                if (now < _ignoreScreenSaverWakeUntil) return;
+                await ExitScreenSaver();
+                return;
+            }
+            // Model work and approval temporarily override screensaver inside
+            // firmware, then return to it if the user is still away. Real user
+            // input exits permanently; AUTO music resumes the normal AUTO page.
+            if (musicWake || systemIdle < TimeSpan.FromSeconds(2)) await ExitScreenSaver();
+            return;
+        }
+        if (_screenSaverTimeoutMinutes <= 0 || important) return;
+        var effectiveIdle = Math.Min(systemIdle.TotalSeconds, (now - _lastScreenSaverActivityAt).TotalSeconds);
+        if (effectiveIdle >= _screenSaverTimeoutMinutes * 60) await EnterScreenSaver(preview: false);
+    }
+
+    async Task RecoverScreenSaverState()
+    {
+        try
+        {
+            var info = await DeviceClient.FetchInfo();
+            _lastKnownMode = info.Mode;
+            if (info.Mode != "screensaver") return;
+            _screenSaverActive = true;
+            if (_cycleEnabled) _cycleTimer.Stop();
+        }
+        catch { }
+    }
+
+    async Task EnterScreenSaver(bool preview)
+    {
+        if (_screenSaverBusy || _screenSaverActive) return;
+        _screenSaverBusy = true;
+        try
+        {
+            var info = await DeviceClient.FetchInfo();
+            _modeBeforeScreenSaver = info.Mode == "screensaver" ? "auto" : info.Mode;
+            Settings.Set(ScreenSaverPreviousModeKey, _modeBeforeScreenSaver);
+            _screenSaverActive = true;
+            _screenSaverPreviewActive = preview;
+            _ignoreScreenSaverWakeUntil = DateTime.MinValue;
+            if (_cycleEnabled) _cycleTimer.Stop();
+            await DeviceClient.SetDisplayMode(preview ? "screensaver_preview" : "screensaver");
+            if (preview) _ignoreScreenSaverWakeUntil = DateTime.UtcNow.AddSeconds(5);
+            _lastKnownMode = "screensaver";
+            await RefreshDeviceSection();
+        }
+        catch (Exception e)
+        {
+            _screenSaverActive = false;
+            _screenSaverPreviewActive = false;
+            Toast("进入屏保失败", e.Message);
+        }
+        finally { _screenSaverBusy = false; }
+    }
+
+    async Task ExitScreenSaver()
+    {
+        if (_screenSaverBusy || !_screenSaverActive) return;
+        _screenSaverBusy = true;
+        var wasPreview = _screenSaverPreviewActive;
+        try
+        {
+            _screenSaverActive = false;
+            _screenSaverPreviewActive = false;
+            _lastScreenSaverActivityAt = DateTime.UtcNow;
+            await DeviceClient.SetDisplayMode(_modeBeforeScreenSaver);
+            _lastKnownMode = _modeBeforeScreenSaver;
+            if (_cycleEnabled) _cycleTimer.Start();
+            await RefreshDeviceSection();
+        }
+        catch (Exception e)
+        {
+            _screenSaverActive = true;
+            _screenSaverPreviewActive = wasPreview;
+            Toast("退出屏保失败", e.Message);
+        }
+        finally { _screenSaverBusy = false; }
+    }
+
     List<string> CyclePages()
     {
         if (_cyclePageItems.Count == CycleModes.Length)
@@ -344,7 +512,7 @@ sealed class TrayAppContext : ApplicationContext
 
     async Task AdvanceCycle()
     {
-        if (!_cycleEnabled || _cycleBusy) return;
+        if (!_cycleEnabled || _cycleBusy || _screenSaverActive) return;
         var pages = CyclePages();
         if (pages.Count == 0) return;
         _cycleBusy = true;
@@ -438,11 +606,13 @@ sealed class TrayAppContext : ApplicationContext
             info.ClaudeCustomSprite ? "C:自定义" : "C:默认",
             info.CodexCustomSprite ? "X:自定义" : "X:默认",
         };
+        _lastKnownMode = info.Mode;
         var showing = info.Mode == "net" ? "系统监控"
             : info.Mode == "music" ? "音乐"
             : info.Mode == "domestic" ? "国产模型"
             : info.Mode == "stock" ? "股票"
             : info.Mode == "weather" ? "天气"
+            : info.Mode == "screensaver" ? "屏保"
             : (info.Showing == "claude" ? "Claude" : "Codex");
         var connection = usb?.Connected == true ? $"USB {usb.PortName}" : info.Ip;
         _deviceInfoItem.Text =
@@ -499,8 +669,15 @@ sealed class TrayAppContext : ApplicationContext
     {
         try
         {
+            if (_screenSaverActive)
+            {
+                _screenSaverActive = false;
+                _screenSaverPreviewActive = false;
+                _lastScreenSaverActivityAt = DateTime.UtcNow;
+            }
             if (_cycleEnabled) await SetCycleEnabled(false, restoreAuto: false);
             await DeviceClient.SetDisplayMode(mode);
+            _lastKnownMode = mode;
             await RefreshDeviceSection();
         }
         catch (Exception e)

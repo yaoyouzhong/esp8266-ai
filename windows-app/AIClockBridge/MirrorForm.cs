@@ -58,6 +58,7 @@ sealed class MirrorControl : Control
     public StockMonitor.Row[] Stocks = Array.Empty<StockMonitor.Row>();
     public bool WeatherMode;
     public WeatherMonitor.Snapshot Weather = new();
+    public bool ScreenSaverMode;
 
     static readonly Image ClaudeLogo = LoadAsset("claude-logo.png");
     static readonly Image CodexLogo = LoadAsset("codex-logo.png");
@@ -113,6 +114,12 @@ sealed class MirrorControl : Control
         {
             g.FillPath(Brushes.Black, panel);
             g.SetClip(panel);
+        }
+
+        if (ScreenSaverMode)
+        {
+            DrawScreenSaverScene(g);
+            return;
         }
 
         if (NetMode)
@@ -206,6 +213,53 @@ sealed class MirrorControl : Control
             g.FillRectangle(red, m, m, t, side);
             g.FillRectangle(red, 240 - m - t, m, t, side);
         }
+    }
+
+    static void DrawScreenSaverScene(Graphics g)
+    {
+        var now = DateTime.Now;
+        var utc = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        using var dateFont = new Font("Microsoft YaHei UI", 17, FontStyle.Bold, GraphicsUnit.Pixel);
+        var weekdays = "日一二三四五六";
+        var date = $"{now:MM-dd} 周{weekdays[(int)now.DayOfWeek]}";
+        var dateW = (int)Math.Ceiling(g.MeasureString(date, dateFont).Width);
+        const int timeW = 204;
+        var groupW = Math.Max(timeW, dateW);
+        const int groupH = 112;
+        var rangeX = Math.Max(1, 240 - groupW - 12);
+        var rangeY = Math.Max(1, 240 - groupH - 24);
+        var motionTick = utc / 5;
+        var phaseX = (int)((motionTick * 2) % (rangeX * 2L));
+        var phaseY = (int)(motionTick % (rangeY * 2L));
+        var x = 6 + (phaseX <= rangeX ? phaseX : rangeX * 2 - phaseX);
+        var y = 12 + (phaseY <= rangeY ? phaseY : rangeY * 2 - phaseY);
+        using var cyan = new SolidBrush(Color.Cyan);
+        using var grey = new SolidBrush(Color.FromArgb(105, 105, 105));
+        var timeX = x + (groupW - timeW) / 2f;
+        var digitX = new[] { timeX, timeX + 47, timeX + 115, timeX + 162 };
+        var digitValue = new[] { now.Hour / 10, now.Hour % 10, now.Minute / 10, now.Minute % 10 };
+        for (var i = 0; i < digitX.Length; i++) DrawLcdDigit(g, digitValue[i], digitX[i], y, cyan);
+        g.FillEllipse(cyan, timeX + 97, y + 21, 10, 10);
+        g.FillEllipse(cyan, timeX + 97, y + 45, 10, 10);
+        using var center = new StringFormat { Alignment = StringAlignment.Center };
+        var firstDigitVisibleLeft = now.Hour / 10 == 1 ? 33 : 0;
+        var timeVisibleCenter = timeX + (firstDigitVisibleLeft + timeW) / 2f;
+        g.DrawString(date, dateFont, grey,
+            new RectangleF(timeVisibleCenter - dateW / 2f, y + 80, dateW, 24), center);
+    }
+
+    static void DrawLcdDigit(Graphics g, int digit, float x, float y, Brush brush)
+    {
+        int[] masks = { 0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f };
+        const float w = 42, h = 76, t = 9, half = h / 2;
+        var mask = masks[Math.Clamp(digit, 0, 9)];
+        if ((mask & 0x01) != 0) g.FillRectangle(brush, x + t, y, w - t * 2, t);
+        if ((mask & 0x02) != 0) g.FillRectangle(brush, x + w - t, y + t, t, half - t);
+        if ((mask & 0x04) != 0) g.FillRectangle(brush, x + w - t, y + half, t, half - t);
+        if ((mask & 0x08) != 0) g.FillRectangle(brush, x + t, y + h - t, w - t * 2, t);
+        if ((mask & 0x10) != 0) g.FillRectangle(brush, x, y + half, t, half - t);
+        if ((mask & 0x20) != 0) g.FillRectangle(brush, x, y + t, t, half - t);
+        if ((mask & 0x40) != 0) g.FillRectangle(brush, x + t, y + half - t / 2, w - t * 2, t);
     }
 
     void DrawPlanBadge(Graphics g)
@@ -443,16 +497,17 @@ sealed class MirrorControl : Control
     {
         var w = Weather;
         using var headerFont = new Font("Microsoft YaHei UI", 17, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var rangeFont = new Font("Consolas", 14, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var rangeFont = new Font("Consolas", 14, FontStyle.Bold, GraphicsUnit.Pixel);
         using var timeFont = new Font("Consolas", 48, FontStyle.Bold, GraphicsUnit.Pixel);
         using var secondFont = new Font("Consolas", 25, FontStyle.Regular, GraphicsUnit.Pixel);
         using var dateFont = new Font("Microsoft YaHei UI", 19, FontStyle.Bold, GraphicsUnit.Pixel);
         using var metricFont = new Font("Consolas", 24, FontStyle.Regular, GraphicsUnit.Pixel);
-        g.DrawString($"{w.City}  {w.Condition}", headerFont, Brushes.White, 14, 1);
+        g.DrawString($"{w.City} {w.Condition}", headerFont, Brushes.White, new RectangleF(14, 1, 130, 26));
         g.DrawString($"L {(int)Math.Round(w.Low)}C", rangeFont, Brushes.Cyan, 20, 34);
         g.DrawString($"H {(int)Math.Round(w.High)}C", rangeFont, Brushes.Orange, 81, 34);
-        using (var badgeFont = new Font("Microsoft YaHei UI", w.AirQuality.Length > 1 ? 10 : 14, FontStyle.Bold, GraphicsUnit.Pixel))
-            g.DrawString(w.AirQuality, badgeFont, Brushes.Gold, 136, 15);
+        using (var badgeFont = new Font("Microsoft YaHei UI", w.AirQuality.Length > 1 ? 10 : 15, FontStyle.Bold, GraphicsUnit.Pixel))
+        using (var badgeFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            g.DrawString(w.AirQuality, badgeFont, Brushes.Gold, new RectangleF(148, 22, 42, 30), badgeFormat);
         using (var iconFont = new Font("Segoe UI Symbol", 28, FontStyle.Regular, GraphicsUnit.Pixel))
             g.DrawString(w.Icon <= 1 ? "☀" : "☁", iconFont, Brushes.Yellow, 190, 18);
 
@@ -842,13 +897,15 @@ sealed class MirrorForm : Form
         ApplyScene(info);
         EnsureSprite(info);
         SyncBrightness(info);
-        var modeIdx = Math.Max(0, Array.IndexOf(Modes, info.Mode));
+        var modeIdx = Array.IndexOf(Modes, info.Mode);
         _applyingMode = true;
-        _modeButtons[modeIdx].Checked = true;
+        foreach (var button in _modeButtons) button.Checked = false;
+        if (modeIdx >= 0) _modeButtons[modeIdx].Checked = true;
         _applyingMode = false;
         var modeText = info.Mode == "auto" ? "自动切换"
             : info.Mode == "net" ? "系统监控"
             : info.Mode == "music" ? "音乐播放"
+            : info.Mode == "screensaver" ? "屏保"
             : info.Mode == "dual" ? "额度总览" : "固定显示";
         _statusLabel.Text = $"{info.Ip} · {modeText} · 数据 {info.Bridge}";
     }
@@ -859,12 +916,18 @@ sealed class MirrorForm : Form
         // mirror what's actually on the device screen (effective), so an
         // AUTO device that auto-switched to music shows music here too
         var enteringNet = info.Effective == "net" && !_mirror.NetMode;
+        _mirror.ScreenSaverMode = info.Effective == "screensaver";
         _mirror.NetMode = info.Effective == "net";
         _mirror.MusicMode = info.Effective == "music";
         _mirror.DomesticMode = info.Effective == "domestic";
         _mirror.DualMode = info.Effective == "dual";
         _mirror.StockMode = info.Effective == "stock";
         _mirror.WeatherMode = info.Effective == "weather";
+        if (_mirror.ScreenSaverMode)
+        {
+            _mirror.Invalidate();
+            return;
+        }
         if (_mirror.NetMode)
         {
             if (enteringNet) _mirror.ResetNetSweep(); // fresh sweep, like the device
@@ -937,7 +1000,7 @@ sealed class MirrorForm : Form
 
     void EnsureSprite(DeviceInfo info)
     {
-        if (info.Effective is "net" or "music" or "dual" or "domestic" or "stock" or "weather") return;
+        if (info.Effective is "net" or "music" or "dual" or "domestic" or "stock" or "weather" or "screensaver") return;
         var slot = info.Showing == "codex" ? "codex" : "claude";
         var w = slot == "claude" ? info.ClaudeW : info.CodexW;
         var h = slot == "claude" ? info.ClaudeH : info.CodexH;
@@ -985,7 +1048,7 @@ sealed class MirrorForm : Form
 
     void AnimTick()
     {
-        if (_lastInfo == null || _mirror.NetMode || _mirror.MusicMode || _mirror.DualMode || _mirror.StockMode || _mirror.WeatherMode) return;
+        if (_lastInfo == null || _mirror.ScreenSaverMode || _mirror.NetMode || _mirror.MusicMode || _mirror.DualMode || _mirror.StockMode || _mirror.WeatherMode) return;
 
         // ~400ms red-border flash while an approval is pending (device cadence)
         if (_mirror.NeedsInput)

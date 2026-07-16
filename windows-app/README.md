@@ -11,6 +11,14 @@ Windows 版功能：
 - **右键托盘图标** → 控制菜单按模型额度、设备连接、显示模式、循环展示、内容设置、桌宠与外观、桥接服务分类；
   循环展示可勾选额度总览、Claude、Codex、天气、股票、国产模型、音乐、系统监控等页面，并选择 10/15/30/60 秒间隔。
   启用时如未勾选页面，默认轮播 Codex、Claude、天气、股票；手动切换页面会自动停止循环。
+- **自动屏保**：在「显示模式 → 屏保设置」选择关闭或 1/5/10/30/60 分钟，也可立即预览。
+  计时依据 Windows 真实键鼠空闲时间；键鼠恢复会退出并恢复原页面，AI 工作或审批提醒会
+  临时覆盖屏保显示对应模型，事件结束后若用户仍未返回则继续屏保。AUTO 模式播放音乐会
+  恢复正常 AUTO 页面。循环展示在屏保期间暂停，退出后继续；立即预览使用强制预览模式，
+  不会被当前正在工作的桌宠或键鼠输入打断，固定展示 5 秒后自动恢复原页面。屏保以七段液晶数字显示时间，每
+  5 秒移动刷新一次，下方显示日期和中文星期。
+- **Codex 动作提醒**：`PermissionRequest` 会从任意固定页面切到 Codex，并以整圈红色边框闪烁；
+  明确的 `Stop` 事件会触发约 2.4 秒绿色边框脉冲和桌宠动画。提醒结束后自动恢复原固定页面。
 - 本地 HTTP 服务 `0.0.0.0:8765`：`/status`、`/net`、`/music`、`/stock`、`/weather` 及其
   RGB565 中文位图端点、`POST /event`（Claude Code / Codex hooks 秒级状态推送）
 
@@ -91,7 +99,7 @@ windows-app\AIClockBridge\bin\Release\net8.0-windows10.0.19041.0\AIClockBridge.e
 
 | 路径 | 内容 |
 |---|---|
-| `%APPDATA%\AIClockBridge\settings.json` | 设备地址、串口和显示/循环/天气设置 |
+| `%APPDATA%\AIClockBridge\settings.json` | 设备地址、串口和显示/循环/屏保/天气设置 |
 | `%APPDATA%\AIClockBridge\usage-cache.json` | Claude/Codex 最近一次成功额度，不含凭据 |
 | `%APPDATA%\AIClockBridge\domestic-quota-cache.json` | 国产模型最近一次准确额度，不含 Cookie |
 | `%APPDATA%\AIClockBridge\weather-cache.json` | 最近一次成功天气 |

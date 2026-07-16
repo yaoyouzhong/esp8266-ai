@@ -8,9 +8,9 @@ namespace AIClockBridge;
 // when the provider or network is temporarily unreachable.
 sealed class WeatherMonitor
 {
-    public const int HeaderW = 176, HeaderH = 26;
+    public const int HeaderW = 130, HeaderH = 26;
     public const int DateW = 190, DateH = 30;
-    public const int AirW = 42, AirH = 26;
+    public const int AirW = 42, AirH = 30;
     const string CityKey = "weather_city";
     const string AnimationKey = "weather_animation";
     static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(8) };
@@ -152,7 +152,7 @@ sealed class WeatherMonitor
     void RenderText(Snapshot snapshot)
     {
         var local = DateTimeOffset.FromUnixTimeSeconds(snapshot.EpochUtc).ToOffset(TimeSpan.FromSeconds(snapshot.UtcOffsetS));
-        var header = $"{snapshot.City}  {snapshot.Condition}";
+        var header = $"{snapshot.City} {snapshot.Condition}";
         var date = $"{local.Month}月{local.Day}日 周{Weekday(local.DayOfWeek)}";
         var key = header + "\n" + date + "\n" + snapshot.AirQuality;
         lock (_lock) if (key == _lastText) return;
@@ -217,10 +217,16 @@ sealed class WeatherMonitor
             _ => Color.Red,
         };
         graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-        using var font = new Font("Microsoft YaHei UI", air.Length > 1 ? 9f : 12f, FontStyle.Bold);
-        TextRenderer.DrawText(graphics, air, font, new Rectangle(1, 0, bitmap.Width - 2, bitmap.Height),
-            color, Color.Black, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter
-                | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+        using var font = new Font("Microsoft YaHei UI", air.Length > 1 ? 10f : 15f,
+                                  FontStyle.Bold, GraphicsUnit.Pixel);
+        using var brush = new SolidBrush(color);
+        using var format = new StringFormat
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+            FormatFlags = StringFormatFlags.NoWrap,
+        };
+        graphics.DrawString(air, font, brush, new RectangleF(0, 0, bitmap.Width, bitmap.Height), format);
     }
 
     static string Weekday(DayOfWeek day) => day switch

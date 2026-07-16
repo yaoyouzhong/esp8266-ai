@@ -17,7 +17,7 @@
 - 小控制帧使用 `@AICLOCK ` + 单行 JSON，协议 `version=1`。
 - 图片、GIF 和精灵图使用 `NUL + COBS + NUL` 分块传输，包含传输 ID、序号、长度、逐块 ACK/CRC32 和整包 CRC32。
 - USB 心跳失效约 8 秒后，设备必须恢复 Wi-Fi HTTP 轮询；修改 USB 路径时不得破坏无线回退。
-- 串口协议、显示模式或二进制类型变更必须同时修改 Windows、固件和相应文档。
+- 串口协议、显示模式或二进制类型变更必须同时修改 Windows、固件和相应文档。`screensaver` 是正式显示模式，不得用亮度 0 代替。
 
 ## Runtime state and secrets
 

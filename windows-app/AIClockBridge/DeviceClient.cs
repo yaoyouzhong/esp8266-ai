@@ -15,7 +15,7 @@ class DeviceInfo
     public string Ip = "";
     public string Ssid = "";
     public string Bridge = "";
-    public string Mode = "auto";       // configured: auto | claude | codex | dual | domestic | net | music | stock | weather
+    public string Mode = "auto";       // configured display mode, including screensaver
     public string Effective = "auto";  // AUTO may promote to domestic or music
     public string Showing = "";
     public int LastUpdateS = -1;       // seconds since the device last got /status data, -1 = never
@@ -139,7 +139,7 @@ static class DeviceClient
         }
     }
 
-    /// POST /api/display  mode=auto|claude|codex|net|music
+    /// POST /api/display; firmware validates the shared mode names.
     public static Task SetDisplayMode(string mode)
     {
         if (Usb?.Connected == true) { Usb.SetDisplayMode(mode); return Task.CompletedTask; }

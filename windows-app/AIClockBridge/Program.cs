@@ -242,7 +242,56 @@ static class Program
             if (usb.DeviceInfo?.Effective != "dual") throw new Exception("dual quota page did not activate");
             Console.Error.WriteLine("[test-usb] dual quota page verified");
 
+            usb.SetDisplayMode("screensaver_preview");
+            await Task.Delay(500);
+            usb.RequestInfo();
+            for (var i = 0; i < 20 && usb.DeviceInfo?.Effective != "screensaver"; i++) await Task.Delay(100);
+            if (usb.DeviceInfo?.Effective != "screensaver") throw new Exception("screensaver page did not activate");
+            Console.Error.WriteLine("[test-usb] screensaver page verified");
+
+            usb.SetDisplayMode("net");
+            await Task.Delay(750);
+            usb.RequestInfo();
+            for (var i = 0; i < 20 && usb.DeviceInfo?.Effective != "net"; i++) await Task.Delay(100);
+            if (usb.DeviceInfo?.Effective != "net") throw new Exception("system monitor page did not activate");
+            Console.Error.WriteLine("[test-usb] system monitor immediate data push verified");
+
             usb.SetDisplayMode("stock");
+            for (var i = 0; i < 40 && usb.DeviceInfo?.Effective != "stock"; i++)
+            {
+                usb.RequestInfo();
+                await Task.Delay(100);
+            }
+            if (usb.DeviceInfo?.Effective != "stock") throw new Exception("stock page did not activate after system monitor");
+            service.RecordEvent("codex", "PermissionRequest");
+            for (var i = 0; i < 40 && (usb.DeviceInfo?.Effective != "auto" || usb.DeviceInfo?.Showing != "codex"); i++)
+            {
+                usb.RequestInfo();
+                await Task.Delay(100);
+            }
+            if (usb.DeviceInfo?.Effective != "auto" || usb.DeviceInfo?.Showing != "codex")
+                throw new Exception("Codex approval alert did not override pinned page");
+            service.RecordEvent("codex", "UserPromptSubmit");
+            for (var i = 0; i < 40 && usb.DeviceInfo?.Effective != "stock"; i++)
+            {
+                usb.RequestInfo();
+                await Task.Delay(100);
+            }
+            if (usb.DeviceInfo?.Effective != "stock") throw new Exception("pinned page did not resume after approval");
+            service.RecordEvent("codex", "Stop");
+            for (var i = 0; i < 40 && (usb.DeviceInfo?.Effective != "auto" || usb.DeviceInfo?.Showing != "codex"); i++)
+            {
+                usb.RequestInfo();
+                await Task.Delay(100);
+            }
+            if (usb.DeviceInfo?.Effective != "auto" || usb.DeviceInfo?.Showing != "codex")
+                throw new Exception("Codex completion alert did not activate");
+            await Task.Delay(2800);
+            usb.RequestInfo();
+            for (var i = 0; i < 20 && usb.DeviceInfo?.Effective != "stock"; i++) await Task.Delay(100);
+            if (usb.DeviceInfo?.Effective != "stock") throw new Exception("pinned page did not resume after completion alert");
+            Console.Error.WriteLine("[test-usb] Codex approval/completion alerts verified");
+
             await Task.Delay(3500);
             Console.Error.WriteLine($"[test-usb] stock page {stocks.Snapshot.Length} row(s), names {stocks.NameBitmap.Length} bytes");
             usb.SetDisplayMode("weather");

@@ -80,16 +80,51 @@ unsigned long lastSwitchMs = 0;
 
 // Display override, settable from the Mac app via POST /api/display:
 // auto = follow working status, claude/codex = pin that app on screen,
-// domestic/net/music/stock/weather = show bridge-side telemetry pages instead of the pet.
-enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_DUAL, MODE_DOMESTIC, MODE_NET, MODE_MUSIC, MODE_STOCK, MODE_WEATHER };
+// domestic/net/music/stock/weather = bridge-side pages; screensaver = moving clock.
+enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_DUAL, MODE_DOMESTIC, MODE_NET, MODE_MUSIC, MODE_STOCK, MODE_WEATHER, MODE_SCREENSAVER };
 DisplayMode displayMode = MODE_AUTO;
 DisplayMode effectiveMode();
+bool screenSaverPreview = false;
+
+const unsigned long COMPLETION_ALERT_MS = 2400;
+unsigned long completionAlertUntilMs = 0;
+bool completionFlashOn = false;
+bool codexCompletionInitialized = false;
+
+bool completionAlertActive() {
+  return (long)(completionAlertUntilMs - millis()) > 0;
+}
+
+void startCodexCompletionAlert() {
+  completionAlertUntilMs = millis() + COMPLETION_ALERT_MS;
+  completionFlashOn = true;
+  currentApp = APP_CODEX;
+  lastSwitchMs = millis();
+}
 
 // When AUTO and the Mac reports audio playing, the screen auto-switches to the
 // music page and back when it stops — same spirit as the Claude/Codex auto
 // switch. Only AUTO does this; a pinned mode is always honored as-is.
 bool statusMusicPlaying = false;
 DisplayMode lastEffectiveMode = MODE_AUTO;
+uint32_t bridgeEpochUtc = 0;
+int bridgeUtcOffsetS = 0;
+unsigned long bridgeClockSyncMs = 0;
+int screenSaverOldX = -1, screenSaverOldY = -1, screenSaverOldW = 0, screenSaverOldH = 0;
+long screenSaverLastTick = -1;
+
+// 18x18 monochrome glyphs for 周日一二三四五六. The screen saver must remain
+// usable without Wi-Fi, so its weekday cannot depend on a bridge bitmap.
+const uint32_t WEEKDAY_GLYPHS[8][18] PROGMEM = {
+  { 0x00000, 0x07FFC, 0x0630C, 0x0630C, 0x06FEC, 0x0630C, 0x0630C, 0x07FEC, 0x0600C, 0x0EFEC, 0x0EC6C, 0x0CC6C, 0x0CFEC, 0x0CC0C, 0x1C00C, 0x08078, 0x00000, 0x00000 },
+  { 0x00000, 0x07FF8, 0x06018, 0x06018, 0x06018, 0x06018, 0x06018, 0x07FF8, 0x06018, 0x06018, 0x06018, 0x06018, 0x06018, 0x06018, 0x07FF8, 0x06018, 0x00000, 0x00000 },
+  { 0x00000, 0x00000, 0x00000, 0x00000, 0x00000, 0x00000, 0x00000, 0x00000, 0x1FFFE, 0x00000, 0x00000, 0x00000, 0x00000, 0x00000, 0x00000, 0x00000, 0x00000, 0x00000 },
+  { 0x00000, 0x00000, 0x07FF8, 0x00000, 0x00000, 0x00000, 0x00000, 0x00000, 0x00000, 0x00000, 0x00000, 0x00000, 0x00000, 0x1FFFE, 0x00000, 0x00000, 0x00000, 0x00000 },
+  { 0x00000, 0x00000, 0x0FFFC, 0x00000, 0x00000, 0x00000, 0x00000, 0x00000, 0x07FF8, 0x00000, 0x00000, 0x00000, 0x00000, 0x00000, 0x1FFFE, 0x00000, 0x00000, 0x00000 },
+  { 0x00000, 0x0FFFC, 0x0CCCC, 0x0CCCC, 0x0CCCC, 0x0CCCC, 0x0CCCC, 0x0CCCC, 0x0CCCC, 0x0CCCC, 0x0D8FC, 0x0F80C, 0x0C00C, 0x0FFFC, 0x0C00C, 0x00000, 0x00000, 0x00000 },
+  { 0x00000, 0x0FFFC, 0x00E00, 0x00C00, 0x00C00, 0x00C00, 0x0FFF0, 0x01C30, 0x01C30, 0x01830, 0x01830, 0x01830, 0x01830, 0x01830, 0x1FFFE, 0x00000, 0x00000, 0x00000 },
+  { 0x00300, 0x00700, 0x00380, 0x00300, 0x1FFFE, 0x00000, 0x00000, 0x01840, 0x01CE0, 0x03870, 0x03870, 0x07038, 0x0601C, 0x0E01C, 0x1C00E, 0x04008, 0x00000, 0x00000 },
+};
 
 // ---------- net speed mode state ----------
 // Rendering is decoupled from the network: pollNet() fetches every 2s and
@@ -149,15 +184,17 @@ String stockLastCode[MAX_STOCKS], stockLastValue[MAX_STOCKS];
 unsigned long lastStockPollMs = 0;
 
 const unsigned long WEATHER_POLL_INTERVAL_MS = 15000;
-const int WEATHER_HEADER_W = 176, WEATHER_HEADER_H = 26;
+const int WEATHER_HEADER_W = 130, WEATHER_HEADER_H = 26;
 const int WEATHER_DATE_W = 190, WEATHER_DATE_H = 30;
-const int WEATHER_AIR_W = 42, WEATHER_AIR_H = 26;
+const int WEATHER_AIR_W = 42, WEATHER_AIR_H = 30;
 const int WEATHER_CONTENT_LEFT = 14;
 const int WEATHER_HEADER_Y = 1;
 const int WEATHER_DATE_X = WEATHER_CONTENT_LEFT, WEATHER_DATE_Y = 117;
 // Centre the air-quality badge in the visual gap between the header text and
 // the weather icon. 132 placed its centre noticeably too far to the right.
-const int WEATHER_AIR_X = 125, WEATHER_AIR_Y = 14;
+// Keep the badge on the right side of the high/low row. It must not share
+// horizontal space with longer header text such as "南京 毛毛雨".
+const int WEATHER_AIR_X = 148, WEATHER_AIR_Y = 22;
 const int WEATHER_ICON_X = 202, WEATHER_ICON_Y = 27;
 const int WEATHER_ANIM_BOTTOM = 224;
 struct WeatherStatus {
@@ -218,6 +255,7 @@ struct CodexStatus {
   float weeklyPct = -1;
   int weeklyResetMin = -1;
   bool needsInput = false;
+  uint32_t completionAt = 0;
 };
 
 struct DomesticProviderStatus {
@@ -837,13 +875,15 @@ void redrawRingOnly() {
 bool updateActiveApp() {
   ActiveApp desired = currentApp;
 
-  if (displayMode == MODE_CLAUDE) {
-    desired = APP_CLAUDE;
-  } else if (displayMode == MODE_CODEX) {
-    desired = APP_CODEX;
-  } else if (claudeStatus.needsInput && !codexStatus.needsInput) {
+  if (claudeStatus.needsInput && !codexStatus.needsInput) {
     desired = APP_CLAUDE; // approval prompt wins the screen
   } else if (codexStatus.needsInput && !claudeStatus.needsInput) {
+    desired = APP_CODEX;
+  } else if (completionAlertActive()) {
+    desired = APP_CODEX;
+  } else if (displayMode == MODE_CLAUDE) {
+    desired = APP_CLAUDE;
+  } else if (displayMode == MODE_CODEX) {
     desired = APP_CODEX;
   } else {
     bool claudeWorking = claudeStatus.status == "working";
@@ -1576,6 +1616,109 @@ void epochToLocal(uint32_t utc, int offset, int &year, int &month, int &day, int
   year += month <= 2;
 }
 
+uint32_t currentBridgeUtc() {
+  if (bridgeEpochUtc > 0) return bridgeEpochUtc + (millis() - bridgeClockSyncMs) / 1000;
+  if (weatherStatus.loaded) return weatherStatus.epochUtc + (millis() - weatherSyncMs) / 1000;
+  return 0;
+}
+
+void drawWeekdayGlyph(int glyph, int x, int y, uint16_t color) {
+  for (int row = 0; row < 18; row++) {
+    uint32_t mask = pgm_read_dword(&WEEKDAY_GLYPHS[glyph][row]);
+    int runStart = -1;
+    for (int col = 0; col <= 18; col++) {
+      bool set = col < 18 && (mask & (1UL << (17 - col)));
+      if (set && runStart < 0) runStart = col;
+      if (!set && runStart >= 0) {
+        tft.fillRect(x + runStart, y + row, col - runStart, 1, color);
+        runStart = -1;
+      }
+    }
+  }
+}
+
+void drawScreenSaverDigit(int digit, int x, int y, uint16_t color) {
+  static const uint8_t masks[10] = { 0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f };
+  const int w = 42, h = 76, t = 9, half = h / 2;
+  uint8_t mask = masks[constrain(digit, 0, 9)];
+  if (mask & 0x01) tft.fillRoundRect(x + t, y, w - t * 2, t, 3, color);
+  if (mask & 0x02) tft.fillRoundRect(x + w - t, y + t, t, half - t, 3, color);
+  if (mask & 0x04) tft.fillRoundRect(x + w - t, y + half, t, half - t, 3, color);
+  if (mask & 0x08) tft.fillRoundRect(x + t, y + h - t, w - t * 2, t, 3, color);
+  if (mask & 0x10) tft.fillRoundRect(x, y + half, t, half - t, 3, color);
+  if (mask & 0x20) tft.fillRoundRect(x, y + t, t, half - t, 3, color);
+  if (mask & 0x40) tft.fillRoundRect(x + t, y + half - t / 2, w - t * 2, t, 3, color);
+}
+
+void drawScreenSaver(bool force) {
+  uint32_t utc = currentBridgeUtc();
+  if (force) {
+    tft.fillScreen(TFT_BLACK);
+    screenSaverOldX = -1;
+    screenSaverLastTick = -1;
+  }
+  if (utc == 0) {
+    if (screenSaverOldX < 0) {
+      tft.setTextDatum(MC_DATUM);
+      tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+      tft.drawString("AI CLOCK", SCREEN_W / 2, SCREEN_H / 2, 4);
+      screenSaverOldX = 0;
+    }
+    return;
+  }
+
+  int year, month, day, hour, minute, second, weekday;
+  int offset = bridgeEpochUtc > 0 ? bridgeUtcOffsetS : weatherStatus.utcOffsetS;
+  epochToLocal(utc, offset, year, month, day, hour, minute, second, weekday);
+  long refreshTick = utc / 5;
+  if (!force && refreshTick == screenSaverLastTick) return;
+
+  char dateBuf[6];
+  snprintf(dateBuf, sizeof(dateBuf), "%02d-%02d", month, day);
+  tft.setTextDatum(TL_DATUM);
+  const int dateFont = 4;
+  int dateW = tft.textWidth(dateBuf, dateFont);
+  const int weekdayW = 38;
+  const int dateLineW = dateW + 8 + weekdayW;
+  const int timeW = 204;
+  int groupW = max(timeW, dateLineW);
+  int groupH = 112;
+  int rangeX = max(1, SCREEN_W - groupW - 12);
+  int rangeY = max(1, SCREEN_H - groupH - 24);
+  uint32_t motionTick = utc / 5;
+  int phaseX = (motionTick * 2) % (rangeX * 2);
+  int phaseY = motionTick % (rangeY * 2);
+  int x = 6 + (phaseX <= rangeX ? phaseX : rangeX * 2 - phaseX);
+  int y = 12 + (phaseY <= rangeY ? phaseY : rangeY * 2 - phaseY);
+
+  if (screenSaverOldX >= 0)
+    tft.fillRect(screenSaverOldX - 2, screenSaverOldY - 2, screenSaverOldW + 4, screenSaverOldH + 4, TFT_BLACK);
+  int timeX = x + (groupW - timeW) / 2;
+  const int digitX[] = { timeX, timeX + 47, timeX + 115, timeX + 162 };
+  const int digitValue[] = { hour / 10, hour % 10, minute / 10, minute % 10 };
+  for (int i = 0; i < 4; i++) drawScreenSaverDigit(digitValue[i], digitX[i], y, TFT_CYAN);
+  // Exact centre of the 26px gap between the hour and minute groups, and
+  // vertically symmetric around the 76px digit centre (y + 38).
+  tft.fillCircle(timeX + 102, y + 26, 5, TFT_CYAN);
+  tft.fillCircle(timeX + 102, y + 50, 5, TFT_CYAN);
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  // Centre the date under the actually lit clock, not the four fixed digit
+  // cells. From 10:00-19:59 the leading "1" starts 33px inside its cell,
+  // which otherwise makes the visible clock look right-shifted.
+  int firstDigitVisibleLeft = hour / 10 == 1 ? 33 : 0;
+  int timeVisibleCenter = timeX + (firstDigitVisibleLeft + timeW) / 2;
+  int dateX = timeVisibleCenter - dateLineW / 2;
+  tft.drawString(dateBuf, dateX, y + 80, dateFont);
+  int weekdayX = dateX + dateW + 8;
+  drawWeekdayGlyph(0, weekdayX, y + 84, TFT_DARKGREY);
+  drawWeekdayGlyph(weekday + 1, weekdayX + 20, y + 84, TFT_DARKGREY);
+  screenSaverOldX = x;
+  screenSaverOldY = y;
+  screenSaverOldW = groupW;
+  screenSaverOldH = groupH;
+  screenSaverLastTick = refreshTick;
+}
+
 void drawWeatherDigit(int digit, int x, int y, uint16_t color) {
   static const uint8_t masks[10] = { 0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f };
   const int w = 16, h = 30, t = 3, half = h / 2;
@@ -1842,8 +1985,11 @@ void drawWeatherScreen(bool force) {
   int highWidth = tft.textWidth(highText, 2);
   int rangeX = max(2, weatherHeaderCenter() - (lowWidth + rangeGap + highWidth) / 2);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_CYAN, TFT_BLACK); tft.drawString(lowText, rangeX, 34, 2);
-  tft.setTextColor(TFT_ORANGE, TFT_BLACK); tft.drawString(highText, rangeX + lowWidth + rangeGap, 34, 2);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString(lowText, rangeX, 34, 2); tft.drawString(lowText, rangeX + 1, 34, 2);
+  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+  int highX = rangeX + lowWidth + rangeGap;
+  tft.drawString(highText, highX, 34, 2); tft.drawString(highText, highX + 1, 34, 2);
   if (textNeedsUpdate && drawWeatherAirFromBridge()) weatherTextDrawnRev = weatherStatus.textRev;
   drawWeatherClock();
   tft.fillRect(WEATHER_CONTENT_LEFT, 158, 134, 72, TFT_BLACK);
@@ -1938,6 +2084,14 @@ bool parseStatusJson(const String &payload) {
     codexStatus.weeklyPct = x["weekly_pct"] | -1.0;
     codexStatus.weeklyResetMin = x["weekly_reset_min"] | -1;
     codexStatus.needsInput = x["needs_input"] | false;
+    uint32_t incomingCompletionAt = x["completion_at"] | 0UL;
+    if (!codexCompletionInitialized) {
+      codexCompletionInitialized = true;
+      codexStatus.completionAt = incomingCompletionAt;
+    } else if (incomingCompletionAt > codexStatus.completionAt) {
+      codexStatus.completionAt = incomingCompletionAt;
+      startCodexCompletionAlert();
+    }
   }
   JsonObject d = doc["domestic"];
   if (!d.isNull()) {
@@ -1952,6 +2106,12 @@ bool parseStatusJson(const String &payload) {
                                    ? domesticStatus.xiaomi : domesticStatus.qwen;
   }
   statusMusicPlaying = doc["music_playing"] | false;
+  uint32_t statusEpoch = doc["ts"] | 0UL;
+  if (statusEpoch > 0) {
+    bridgeEpochUtc = statusEpoch;
+    bridgeUtcOffsetS = doc["local_utc_offset_s"] | 0;
+    bridgeClockSyncMs = millis();
+  }
   return true;
 }
 
@@ -1959,9 +2119,14 @@ bool parseStatusJson(const String &payload) {
 // the pet so its border can flash red at you), otherwise audio promotes to the
 // music page.
 DisplayMode effectiveMode() {
+  if (displayMode == MODE_SCREENSAVER && screenSaverPreview) return MODE_SCREENSAVER;
+  if (domesticStatus.needsInput) return MODE_DOMESTIC;
+  if (claudeStatus.needsInput || codexStatus.needsInput || completionAlertActive()) return MODE_AUTO;
+  if (displayMode == MODE_SCREENSAVER) {
+    if (domesticStatus.status == "working") return MODE_DOMESTIC;
+    if (claudeStatus.status == "working" || codexStatus.status == "working") return MODE_AUTO;
+  }
   if (displayMode == MODE_AUTO) {
-    if (domesticStatus.needsInput) return MODE_DOMESTIC;
-    if (claudeStatus.needsInput || codexStatus.needsInput) return MODE_AUTO;
     if (statusMusicPlaying) return MODE_MUSIC;
     if (domesticStatus.status == "working") return MODE_DOMESTIC;
   }
@@ -2007,7 +2172,7 @@ void pollBridge() {
     drawDomesticScreen();
   } else if (eff == MODE_DUAL) {
     drawDualScreen();
-  } else if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK && eff != MODE_WEATHER) {
+  } else if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK && eff != MODE_WEATHER && eff != MODE_SCREENSAVER) {
     // Only a real app switch clears the screen; a plain data refresh paints
     // in place so the poll doesn't flash the whole display.
     if (updateActiveApp()) drawActiveApp();
@@ -2114,6 +2279,7 @@ const char *displayModeName(DisplayMode m) {
   if (m == MODE_MUSIC) return "music";
   if (m == MODE_STOCK) return "stock";
   if (m == MODE_WEATHER) return "weather";
+  if (m == MODE_SCREENSAVER) return "screensaver";
   return "auto";
 }
 
@@ -2175,6 +2341,7 @@ void handleApiInfo() {
 
 void handleApiDisplay() {
   String mode = webServer.arg("mode");
+  screenSaverPreview = mode == "screensaver_preview";
   if (mode == "auto") displayMode = MODE_AUTO;
   else if (mode == "claude") displayMode = MODE_CLAUDE;
   else if (mode == "codex") displayMode = MODE_CODEX;
@@ -2184,8 +2351,10 @@ void handleApiDisplay() {
   else if (mode == "music") displayMode = MODE_MUSIC;
   else if (mode == "stock") displayMode = MODE_STOCK;
   else if (mode == "weather") displayMode = MODE_WEATHER;
+  else if (mode == "screensaver" || mode == "screensaver_preview") displayMode = MODE_SCREENSAVER;
   else {
-    webServer.send(400, "text/plain", "mode must be auto|claude|codex|dual|domestic|net|music|stock|weather");
+    screenSaverPreview = false;
+    webServer.send(400, "text/plain", "mode must be auto|claude|codex|dual|domestic|net|music|stock|weather|screensaver");
     return;
   }
   Serial.printf("[api] display mode = %s\n", mode.c_str());
@@ -2206,6 +2375,8 @@ void handleApiDisplay() {
   } else if (displayMode == MODE_WEATHER) {
     lastWeatherPollMs = 0;
     drawWeatherCachedOrLoading();
+  } else if (displayMode == MODE_SCREENSAVER) {
+    drawScreenSaver(true);
   } else {
     updateActiveApp();
     drawActiveApp(); // unconditional: also repaints over a previous net chart
@@ -2671,6 +2842,7 @@ void sendSpriteUsb(ActiveApp slot, uint16_t transfer) {
 }
 
 void applyUsbDisplayMode(const String &mode) {
+  screenSaverPreview = mode == "screensaver_preview";
   if (mode == "auto") displayMode = MODE_AUTO;
   else if (mode == "claude") displayMode = MODE_CLAUDE;
   else if (mode == "codex") displayMode = MODE_CODEX;
@@ -2680,10 +2852,17 @@ void applyUsbDisplayMode(const String &mode) {
   else if (mode == "music") displayMode = MODE_MUSIC;
   else if (mode == "stock") displayMode = MODE_STOCK;
   else if (mode == "weather") displayMode = MODE_WEATHER;
-  else return;
+  else if (mode == "screensaver" || mode == "screensaver_preview") displayMode = MODE_SCREENSAVER;
+  else { screenSaverPreview = false; return; }
   lastEffectiveMode = effectiveMode();
   if (displayMode == MODE_NET) {
-    netChromeDrawn = false;
+    // Initialise synchronously so a net frame sent immediately after the
+    // set_display command is not discarded by the first draw tick.
+    resetNetChart();
+    drawNetChrome();
+    netChromeDrawn = true;
+    netHeaderDirty = true;
+    lastNetDrawMs = millis();
     lastNetPollMs = 0;
   } else if (displayMode == MODE_MUSIC) {
     musicChromeDrawn = false;
@@ -2696,6 +2875,8 @@ void applyUsbDisplayMode(const String &mode) {
     drawStockCachedOrLoading();
   } else if (displayMode == MODE_WEATHER) {
     drawWeatherCachedOrLoading();
+  } else if (displayMode == MODE_SCREENSAVER) {
+    drawScreenSaver(true);
   } else {
     updateActiveApp();
     drawActiveApp();
@@ -2733,7 +2914,8 @@ void handleUsbFrame(const String &json) {
         drawDomesticScreen();
       } else if (eff == MODE_DUAL) {
         drawDualScreen();
-      } else if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK && eff != MODE_WEATHER) {
+      } else if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK
+                 && eff != MODE_WEATHER && eff != MODE_SCREENSAVER) {
         if (updateActiveApp()) drawActiveApp();
         else refreshActiveApp();
       }
@@ -3250,6 +3432,8 @@ void loop() {
     } else if (eff == MODE_WEATHER) {
       lastWeatherPollMs = 0;
       drawWeatherCachedOrLoading();
+    } else if (eff == MODE_SCREENSAVER) {
+      drawScreenSaver(true);
     } else {
       updateActiveApp();
       drawActiveApp();
@@ -3305,6 +3489,8 @@ void loop() {
       weatherAnimFrame++;
       drawWeatherAnimation();
     }
+  } else if (eff == MODE_SCREENSAVER) {
+    drawScreenSaver(false);
   } else {
     // sprite walk-cycle animation (only advances while that app is showing)
     if (nowMs - lastAnimMs >= ANIM_INTERVAL_MS) {
@@ -3316,7 +3502,7 @@ void loop() {
       } else if (currentApp == APP_CLAUDE && claudeWorking) {
         claudeFrame = (claudeFrame + 1) % claudeFrameCount();
         drawClaudeSprite(claudeFrame);
-      } else if (currentApp == APP_CODEX && codexWorking) {
+      } else if (currentApp == APP_CODEX && (codexWorking || completionAlertActive())) {
         codexFrame = (codexFrame + 1) % codexFrameCount();
         drawCodexSprite(codexFrame);
       }
@@ -3339,6 +3525,10 @@ void loop() {
         // approval needed: blink the whole border red, restore the quota ring
         // on the off-phase so it doesn't erase the normal chrome permanently
         if (flashOn) drawFullBorder(TFT_RED);
+        else redrawRingOnly();
+      } else if (completionAlertActive()) {
+        completionFlashOn = !completionFlashOn;
+        if (completionFlashOn) drawFullBorder(TFT_GREEN);
         else redrawRingOnly();
       }
     }

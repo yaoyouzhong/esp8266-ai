@@ -31,6 +31,7 @@ A retro mini-TV with a 240×240 screen that shows **what Claude Code / Codex CLI
 | <img src="docs/images/feature2.jpg" width="360" alt="System monitor"> | **Live system monitor**<br>Task-manager-style upload/download curves, a 56-second rolling window, an auto-scaling axis, plus Windows CPU and memory usage. |
 | <img src="docs/images/music.jpg" width="360" alt="Now playing"> | **Now playing**<br>Album art, title, artist and progress bar in real time; switches in automatically when music starts, back when it stops. |
 | | **Weather clock & stocks**<br>A Chinese weather clock with seconds, air quality, temperature, humidity and selectable pixel animation; plus up to four A-share, Hong Kong or US stocks using red-for-up/green-for-down. Both keep the last successful data during network failures. |
+| | **Automatic screen saver & Codex alerts**<br>Windows can enter a moving-clock screen saver after 1/5/10/30/60 minutes of real keyboard and mouse inactivity. Immediate preview stays visible even while a pet is working. A Codex approval request globally switches to a red-border alert; an explicit task completion briefly shows green pulses and a celebrating pet, then restores the previous page. |
 | <img src="docs/images/feature3.jpg" width="360" alt="Swappable pets"> | **Swappable pets**<br>Built-in [petdex.dev](https://petdex.dev) gallery with 3300+ open-source pets, or upload any GIF — decoded on the board itself, no reflashing needed. |
 
 ## Getting started
@@ -63,6 +64,7 @@ The bridge lives in your menu bar / tray. Windows uses direct CH340 serial trans
 </p>
 
 Daily use is all on the tray icon: **left-click** opens a live mirror (with a brightness slider); **right-click** opens grouped menus for quota, device connection, display modes, page cycling, content, pets and bridge service. The cycle can include selected pages at 10/15/30/60-second intervals, and a manual page switch stops cycling.
+Screen saver controls are under **Display mode → Screen saver**, including timeout selection and immediate preview.
 
 ## FAQ
 
