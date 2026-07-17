@@ -27,11 +27,11 @@ A retro mini-TV with a 240×240 screen that shows **what Claude Code / Codex CLI
 
 | | |
 |---|---|
-| <img src="docs/images/feature1.jpg" width="360" alt="AI status"> | **AI status & quota**<br>Pet is walking = the AI is working. Claude/Codex show provider-reported quota windows. The domestic-model page recognizes Qwen and Xiaomi MiMo sessions; after Alibaba Cloud authorization, it also shows the verified Qwen Token Plan percentage. Unknown quota stays `--` instead of being estimated. |
+| <img src="docs/images/feature1.jpg" width="360" alt="AI status"> | **AI status & quota**<br>Pet is walking = the AI is working. Claude/Codex show provider-reported quota windows. The domestic-model submenu selects exactly one vendor. Alibaba Bailian shows Qwen Token Plan usage; Moonshot shows the Kimi Coding Plan Weekly/5h windows. Values are read from the vendor's authenticated account page and cached; unknown quota stays `--` instead of being estimated. |
 | <img src="docs/images/feature2.jpg" width="360" alt="System monitor"> | **Live system monitor**<br>Task-manager-style upload/download curves, a 56-second rolling window, an auto-scaling axis, plus Windows CPU and memory usage. |
 | <img src="docs/images/music.jpg" width="360" alt="Now playing"> | **Now playing**<br>Album art, title, artist and progress bar in real time; switches in automatically when music starts, back when it stops. |
-| | **Weather clock & stocks**<br>A Chinese weather clock with seconds, air quality, temperature, humidity and selectable pixel animation; plus up to four A-share, Hong Kong or US stocks using red-for-up/green-for-down. Both keep the last successful data during network failures. |
-| | **Automatic screen saver & Codex alerts**<br>Windows can enter a moving-clock screen saver after 1/5/10/30/60 minutes of real keyboard and mouse inactivity. Immediate preview stays visible even while a pet is working. A Codex approval request globally switches to a red-border alert; an explicit task completion briefly shows green pulses and a celebrating pet, then restores the previous page. |
+| | **Weather clock & stocks**<br>A Chinese weather clock with seconds, air quality, temperature, humidity and selectable pixel animation. Windows can use QWeather live conditions with a manually configured district or Windows geolocation, then fall back to Open-Meteo. The stock page supports up to four A-share, Hong Kong or US symbols using red-for-up/green-for-down. Both keep the last successful data during network failures. |
+| | **Automatic screen saver & Codex alerts**<br>Windows can enter a moving-clock screen saver after 1/5/10/30/60 minutes of real keyboard and mouse inactivity. Immediate preview stays visible even while a pet is working. A Codex approval request globally switches to a red-border alert; one or more task completions play the Windows system sound while the display keeps pulsing green with a celebrating pet until Codex returns to the foreground. |
 | <img src="docs/images/feature3.jpg" width="360" alt="Swappable pets"> | **Swappable pets**<br>Built-in [petdex.dev](https://petdex.dev) gallery with 3300+ open-source pets, or upload any GIF — decoded on the board itself, no reflashing needed. |
 
 ## Getting started
@@ -64,13 +64,15 @@ The bridge lives in your menu bar / tray. Windows uses direct CH340 serial trans
 </p>
 
 Daily use is all on the tray icon: **left-click** opens a live mirror (with a brightness slider); **right-click** opens grouped menus for quota, device connection, display modes, page cycling, content, pets and bridge service. The cycle can include selected pages at 10/15/30/60-second intervals, and a manual page switch stops cycling.
+The **Claude + Codex Quota** display mode puts both providers' limits and reset countdowns on one page.
+**Display mode → Domestic models** lists the major Chinese vendors and selects exactly one. Alibaba Bailian and Moonshot Kimi are currently wired for verified quota capture; other entries are marked pending.
 Screen saver controls are under **Display mode → Screen saver**, including timeout selection and immediate preview.
 
 ## FAQ
 
 - **Screen border flashing red**: the device cannot reach the bridge. On Windows, check the USB data cable and the bridge app first; for macOS or wireless fallback, check LAN reachability.
 - **Windows devices on the same WiFi still cannot communicate**: keep the USB data cable attached. Status, media, weather, stocks, display control and pet transfer all use direct COM transport and do not require LAN peer access.
-- **Quota shows `-` / `--`**: the provider did not return a verifiable value. Qwen Token Plan requires one sign-in under “Model quota → Domestic model quota authorization”; the session is retained for 30 days and renewed after successful reads. Domestic `today` tokens currently come only from local Claude Code logs and do not represent every app using the Alibaba account.
+- **Quota shows `-` / `--`**: the provider did not return a verifiable value. Qwen Token Plan and Kimi Coding Plan require one sign-in under “Model quota → Domestic model quota authorization”; the authorization page opens the currently selected vendor. Its isolated WebView2 session is retained for 30 days and renewed after successful reads. Domestic `today` tokens currently come only from local Claude Code logs and do not represent every app using the vendor account.
 - **Want a different pet**: right-click the tray icon → "Change pet animation…", pick one and upload.
 
 ## Development

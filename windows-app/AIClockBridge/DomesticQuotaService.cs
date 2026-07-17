@@ -6,12 +6,41 @@ using Microsoft.Web.WebView2.WinForms;
 
 namespace AIClockBridge;
 
+sealed record DomesticProviderDefinition(
+    string Id, string Name, string Product, string Url, bool CaptureSupported);
+
+static class DomesticProviderCatalog
+{
+    public static readonly DomesticProviderDefinition[] All =
+    {
+        new("qwen", "阿里云百炼", "千问 Token Plan",
+            "https://bailian.console.aliyun.com/cn-beijing?tab=plan#/efm/subscription/token-plan", true),
+        new("kimi", "月之暗面", "Kimi Coding Plan", "https://www.kimi.com/code/console", true),
+        new("xiaomi", "小米 MiMo", "MiMo Token Plan",
+            "https://platform.xiaomimimo.com/token-plan", false),
+        new("zhipu", "智谱 AI", "GLM / Coding Plan", "https://open.bigmodel.cn/usercenter", false),
+        new("volcengine", "火山方舟", "豆包大模型", "https://console.volcengine.com/ark", false),
+        new("minimax", "MiniMax", "MiniMax 开放平台", "https://platform.minimaxi.com/", false),
+        new("deepseek", "DeepSeek", "DeepSeek 开放平台", "https://platform.deepseek.com/usage", false),
+        new("baidu", "百度智能云", "千帆 / 文心", "https://console.bce.baidu.com/qianfan/overview", false),
+        new("tencent", "腾讯云", "混元大模型", "https://console.cloud.tencent.com/hunyuan", false),
+        new("huawei", "华为云", "盘古 / ModelArts", "https://console.huaweicloud.com/modelarts/", false),
+        new("iflytek", "讯飞开放平台", "讯飞星火", "https://console.xfyun.cn/", false),
+        new("stepfun", "阶跃星辰", "StepFun", "https://platform.stepfun.com/", false),
+        new("baichuan", "百川智能", "Baichuan", "https://platform.baichuan-ai.com/", false),
+        new("lingyi", "零一万物", "Yi", "https://platform.lingyiwanwu.com/", false),
+    };
+}
+
 sealed class DomesticQuotaSnapshot
 {
     public double? QwenPlanPct;
     public double? XiaomiPlanPct;
+    public double? KimiWeeklyPct;
+    public double? KimiFiveHourPct;
     public DateTime? QwenFetchedAt;
     public DateTime? XiaomiFetchedAt;
+    public DateTime? KimiFetchedAt;
 }
 
 /// Reads the same read-only quota responses as the vendors' own account pages.
@@ -34,16 +63,21 @@ sealed class DomesticQuotaService
             {
                 QwenPlanPct = _snapshot.QwenPlanPct,
                 XiaomiPlanPct = _snapshot.XiaomiPlanPct,
+                KimiWeeklyPct = _snapshot.KimiWeeklyPct,
+                KimiFiveHourPct = _snapshot.KimiFiveHourPct,
                 QwenFetchedAt = _snapshot.QwenFetchedAt,
                 XiaomiFetchedAt = _snapshot.XiaomiFetchedAt,
+                KimiFetchedAt = _snapshot.KimiFetchedAt,
             };
         }
     }
 
-    public void OpenAuthorization()
+    public void OpenAuthorization(string providerId = "qwen")
     {
         if (_form == null || _form.IsDisposed)
-            _form = new DomesticQuotaAuthForm(this);
+            _form = new DomesticQuotaAuthForm(this, initialProviderId: providerId);
+        else
+            _form.NavigateToProvider(providerId);
         _form.TopMost = true;
         if (!_form.Visible) _form.Show();
         _form.BringToFront();
@@ -59,6 +93,17 @@ sealed class DomesticQuotaService
     internal void SetXiaomi(double pct)
     {
         lock (_lock) { _snapshot.XiaomiPlanPct = Clamp(pct); _snapshot.XiaomiFetchedAt = DateTime.UtcNow; Save(); }
+    }
+
+    internal void SetKimi(double weeklyPct, double? fiveHourPct)
+    {
+        lock (_lock)
+        {
+            _snapshot.KimiWeeklyPct = Clamp(weeklyPct);
+            _snapshot.KimiFiveHourPct = fiveHourPct.HasValue ? Clamp(fiveHourPct.Value) : null;
+            _snapshot.KimiFetchedAt = DateTime.UtcNow;
+            Save();
+        }
     }
 
     static double Clamp(double value) => Math.Clamp(value, 0, 100);
@@ -84,40 +129,17 @@ sealed class DomesticQuotaService
 
 sealed class DomesticQuotaAuthForm : Form
 {
-    const string AlibabaConsoleUrl =
-        "https://bailian.console.aliyun.com/cn-beijing?tab=plan#/efm/subscription/token-plan";
     static readonly TimeSpan LoginRetention = TimeSpan.FromDays(30);
-
-    sealed record Provider(string Id, string Name, string Product, string Url, bool CaptureSupported);
-
-    static readonly Provider[] Providers =
-    {
-        new("qwen", "阿里云百炼", "千问 Token Plan",
-            AlibabaConsoleUrl, true),
-        new("xiaomi", "小米 MiMo", "MiMo Token Plan",
-            "https://platform.xiaomimimo.com/token-plan", true),
-        new("zhipu", "智谱 AI", "GLM / Coding Plan", "https://open.bigmodel.cn/usercenter", false),
-        new("volcengine", "火山方舟", "豆包大模型", "https://console.volcengine.com/ark", false),
-        new("moonshot", "月之暗面", "Kimi", "https://platform.moonshot.cn/console", false),
-        new("minimax", "MiniMax", "MiniMax 开放平台", "https://platform.minimaxi.com/", false),
-        new("deepseek", "DeepSeek", "DeepSeek 开放平台", "https://platform.deepseek.com/usage", false),
-        new("baidu", "百度智能云", "千帆 / 文心", "https://console.bce.baidu.com/qianfan/overview", false),
-        new("tencent", "腾讯云", "混元大模型", "https://console.cloud.tencent.com/hunyuan", false),
-        new("huawei", "华为云", "盘古 / ModelArts", "https://console.huaweicloud.com/modelarts/", false),
-        new("iflytek", "讯飞开放平台", "讯飞星火", "https://console.xfyun.cn/", false),
-        new("stepfun", "阶跃星辰", "StepFun", "https://platform.stepfun.com/", false),
-        new("baichuan", "百川智能", "Baichuan", "https://platform.baichuan-ai.com/", false),
-        new("lingyi", "零一万物", "Yi", "https://platform.lingyiwanwu.com/", false),
-    };
 
     readonly DomesticQuotaService _service;
     readonly bool _hideOnUserClose;
     readonly WebView2 _web = new() { Dock = DockStyle.Fill };
-    readonly Dictionary<string, (bool IsAlibaba, string Endpoint)> _quotaResponses = new();
+    readonly Dictionary<string, (string ProviderId, string Endpoint)> _quotaResponses = new();
     readonly Dictionary<string, Panel> _providerCards = new();
     CoreWebView2DevToolsProtocolEventReceiver _responseReceiver;
     CoreWebView2DevToolsProtocolEventReceiver _finishedReceiver;
-    Provider _activeProvider;
+    DomesticProviderDefinition _activeProvider;
+    string _initialProviderId;
     int _navigationGeneration;
     bool _capturedForNavigation;
     readonly Label _providerTitle = new()
@@ -137,10 +159,12 @@ sealed class DomesticQuotaAuthForm : Form
         Text = "选择左侧厂商。已支持的厂商在登录后会自动读取准确额度。",
     };
 
-    public DomesticQuotaAuthForm(DomesticQuotaService service, bool hideOnUserClose = true)
+    public DomesticQuotaAuthForm(DomesticQuotaService service, bool hideOnUserClose = true,
+                                 string initialProviderId = "qwen")
     {
         _service = service;
         _hideOnUserClose = hideOnUserClose;
+        _initialProviderId = initialProviderId;
         Text = "国产模型额度授权";
         StartPosition = FormStartPosition.CenterScreen;
         WindowState = FormWindowState.Maximized;
@@ -169,7 +193,7 @@ sealed class DomesticQuotaAuthForm : Form
         navigation.Controls.Add(providerList);
         navigation.Controls.Add(navigationTitle);
 
-        foreach (var provider in Providers) providerList.Controls.Add(BuildProviderCard(provider));
+        foreach (var provider in DomesticProviderCatalog.All) providerList.Controls.Add(BuildProviderCard(provider));
 
         var content = new Panel { Dock = DockStyle.Fill, BackColor = Color.White };
         var header = new Panel
@@ -195,14 +219,25 @@ sealed class DomesticQuotaAuthForm : Form
         Controls.Add(content);
         Controls.Add(navigation);
 
-        Shown += async (_, _) => await SelectProvider(Providers[0]);
+        Shown += async (_, _) => await SelectProvider(ProviderById(_initialProviderId));
     }
+
+    public void NavigateToProvider(string providerId)
+    {
+        _initialProviderId = providerId;
+        if (IsHandleCreated)
+            BeginInvoke(async () => await SelectProvider(ProviderById(providerId)));
+    }
+
+    static DomesticProviderDefinition ProviderById(string providerId) =>
+        DomesticProviderCatalog.All.FirstOrDefault(x => x.Id == providerId)
+        ?? DomesticProviderCatalog.All[0];
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         if (_hideOnUserClose && e.CloseReason == CloseReason.UserClosing)
         {
-            if (_activeProvider?.Id == "qwen") _ = PersistAlibabaLoginCookies();
+            if (_activeProvider?.Id is "qwen" or "kimi") _ = PersistLoginCookies(_activeProvider.Url);
             e.Cancel = true;
             Hide();
             return;
@@ -210,7 +245,7 @@ sealed class DomesticQuotaAuthForm : Form
         base.OnFormClosing(e);
     }
 
-    Panel BuildProviderCard(Provider provider)
+    Panel BuildProviderCard(DomesticProviderDefinition provider)
     {
         var card = new Panel
         {
@@ -249,7 +284,7 @@ sealed class DomesticQuotaAuthForm : Form
         return card;
     }
 
-    async Task SelectProvider(Provider provider)
+    async Task SelectProvider(DomesticProviderDefinition provider)
     {
         _activeProvider = provider;
         foreach (var (id, card) in _providerCards)
@@ -263,7 +298,7 @@ sealed class DomesticQuotaAuthForm : Form
         await Navigate(provider);
     }
 
-    async Task Navigate(Provider provider)
+    async Task Navigate(DomesticProviderDefinition provider)
     {
         var generation = ++_navigationGeneration;
         _capturedForNavigation = false;
@@ -283,8 +318,8 @@ sealed class DomesticQuotaAuthForm : Form
             _finishedReceiver.DevToolsProtocolEventReceived += CdpLoadingFinished;
             _web.CoreWebView2.NavigationCompleted += async (_, e) =>
             {
-                if (e.IsSuccess && _activeProvider?.Id == "qwen")
-                    await PersistAlibabaLoginCookies();
+                if (e.IsSuccess && _activeProvider?.Id is "qwen" or "kimi")
+                    await PersistLoginCookies(_activeProvider.Url);
             };
         }
         _status.Text = provider.CaptureSupported
@@ -294,13 +329,19 @@ sealed class DomesticQuotaAuthForm : Form
         if (provider.CaptureSupported) _ = ShowPendingStatus(provider, generation);
     }
 
-    async Task ShowPendingStatus(Provider provider, int generation)
+    async Task ShowPendingStatus(DomesticProviderDefinition provider, int generation)
     {
         await Task.Delay(TimeSpan.FromSeconds(12));
         if (IsDisposed || generation != _navigationGeneration || _activeProvider != provider
             || _capturedForNavigation) return;
         var snapshot = _service.Snapshot;
-        var fetchedAt = provider.Id == "qwen" ? snapshot.QwenFetchedAt : snapshot.XiaomiFetchedAt;
+        var fetchedAt = provider.Id switch
+        {
+            "qwen" => snapshot.QwenFetchedAt,
+            "xiaomi" => snapshot.XiaomiFetchedAt,
+            "kimi" => snapshot.KimiFetchedAt,
+            _ => null,
+        };
         var last = fetchedAt.HasValue
             ? $"最近成功：{fetchedAt.Value.ToLocalTime():M月d日 HH:mm}"
             : "尚无成功记录";
@@ -329,11 +370,15 @@ sealed class DomesticQuotaAuthForm : Form
                 && alibabaUri.AbsolutePath.Equals("/data/api.json", StringComparison.OrdinalIgnoreCase);
             var isXiaomi = _activeProvider?.Id == "xiaomi"
                 && uri.Contains("/api/v1/tokenPlan/usage", StringComparison.OrdinalIgnoreCase);
-            if (requestId != null && (isAlibaba || isXiaomi))
+            var isKimi = _activeProvider?.Id == "kimi" && jsonRequest
+                && uri.Contains("kimi.gateway.billing.v1.BillingService/GetUsages",
+                    StringComparison.OrdinalIgnoreCase);
+            if (requestId != null && (isAlibaba || isXiaomi || isKimi))
             {
                 var endpoint = Uri.TryCreate(uri, UriKind.Absolute, out var parsed)
                     ? parsed.Host + parsed.AbsolutePath : uri.Split('?')[0];
-                _quotaResponses[requestId] = (isAlibaba, endpoint);
+                _quotaResponses[requestId] =
+                    (isAlibaba ? "qwen" : isXiaomi ? "xiaomi" : "kimi", endpoint);
             }
         }
         catch
@@ -352,8 +397,6 @@ sealed class DomesticQuotaAuthForm : Form
         }
         catch { return; }
         if (requestId == null || !_quotaResponses.Remove(requestId, out var responseInfo)) return;
-        var isAlibaba = responseInfo.IsAlibaba;
-
         try
         {
             var args = JsonSerializer.Serialize(new { requestId });
@@ -366,14 +409,35 @@ sealed class DomesticQuotaAuthForm : Form
                 body = Encoding.UTF8.GetString(Convert.FromBase64String(body));
 
             using var doc = JsonDocument.Parse(body);
-            var pct = FindUsage(doc.RootElement, isAlibaba);
-            if (!pct.HasValue) return;
-            if (isAlibaba) _service.SetQwen(pct.Value); else _service.SetXiaomi(pct.Value);
-            var loginSaved = isAlibaba && await PersistAlibabaLoginCookies();
+            double weeklyPct;
+            double? fiveHourPct = null;
+            if (responseInfo.ProviderId == "kimi")
+            {
+                var kimi = FindKimiUsage(doc.RootElement);
+                if (kimi == null) return;
+                weeklyPct = kimi.Value.WeeklyPct;
+                fiveHourPct = kimi.Value.FiveHourPct;
+                _service.SetKimi(weeklyPct, fiveHourPct);
+            }
+            else
+            {
+                var pct = FindUsage(doc.RootElement, responseInfo.ProviderId == "qwen");
+                if (!pct.HasValue) return;
+                weeklyPct = pct.Value;
+                if (responseInfo.ProviderId == "qwen") _service.SetQwen(pct.Value);
+                else _service.SetXiaomi(pct.Value);
+            }
+            var responseProvider = ProviderById(responseInfo.ProviderId);
+            var loginSaved = responseInfo.ProviderId is "qwen" or "kimi"
+                && await PersistLoginCookies(responseProvider.Url);
             _capturedForNavigation = true;
             BeginInvoke(() => _status.Text =
-                $"已取得{(isAlibaba ? "阿里云" : "小米")}准确用量：{pct.Value:F1}%（已缓存）"
-                + (loginSaved ? "；登录状态已持久保存" : ""));
+                responseInfo.ProviderId == "kimi"
+                    ? $"已取得 Kimi 准确用量：Weekly {weeklyPct:0.##}%"
+                        + (fiveHourPct.HasValue ? $"，5h {fiveHourPct.Value:0.##}%" : "")
+                        + "（已缓存）" + (loginSaved ? "；登录状态已持久保存" : "")
+                    : $"已取得{(responseInfo.ProviderId == "qwen" ? "阿里云" : "小米")}准确用量：{weeklyPct:F1}%（已缓存）"
+                    + (loginSaved ? "；登录状态已持久保存" : ""));
         }
         catch (Exception ex)
         {
@@ -381,13 +445,13 @@ sealed class DomesticQuotaAuthForm : Form
         }
     }
 
-    async Task<bool> PersistAlibabaLoginCookies()
+    async Task<bool> PersistLoginCookies(string url)
     {
         if (_web.CoreWebView2 == null) return false;
         try
         {
             var manager = _web.CoreWebView2.CookieManager;
-            var cookies = await manager.GetCookiesAsync(AlibabaConsoleUrl);
+            var cookies = await manager.GetCookiesAsync(url);
             var expires = DateTime.UtcNow.Add(LoginRetention);
             var updated = false;
             foreach (var cookie in cookies)
@@ -403,6 +467,66 @@ sealed class DomesticQuotaAuthForm : Form
         {
             return false;
         }
+    }
+
+    readonly record struct KimiUsage(double WeeklyPct, double? FiveHourPct);
+
+    static KimiUsage? FindKimiUsage(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var values = element.EnumerateObject().ToDictionary(p => p.Name, p => p.Value,
+                StringComparer.OrdinalIgnoreCase);
+            if (values.TryGetValue("usages", out var usages) && usages.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var usage in usages.EnumerateArray())
+                {
+                    if (usage.ValueKind != JsonValueKind.Object) continue;
+                    var usageValues = usage.EnumerateObject().ToDictionary(p => p.Name, p => p.Value,
+                        StringComparer.OrdinalIgnoreCase);
+                    if (!usageValues.TryGetValue("detail", out var detail)) continue;
+                    var weeklyPct = PercentageFromRemaining(detail);
+                    if (!weeklyPct.HasValue) continue;
+                    double? fiveHourPct = null;
+                    if (usageValues.TryGetValue("limits", out var limits)
+                        && limits.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var limit in limits.EnumerateArray())
+                        {
+                            if (limit.ValueKind != JsonValueKind.Object) continue;
+                            var limitValues = limit.EnumerateObject().ToDictionary(p => p.Name, p => p.Value,
+                                StringComparer.OrdinalIgnoreCase);
+                            if (limitValues.TryGetValue("detail", out var rateDetail)
+                                && PercentageFromRemaining(rateDetail) is double ratePct)
+                            {
+                                fiveHourPct = ratePct;
+                                break;
+                            }
+                        }
+                    }
+                    return new KimiUsage(weeklyPct.Value, fiveHourPct);
+                }
+            }
+            foreach (var child in values.Values)
+                if (FindKimiUsage(child) is KimiUsage found) return found;
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in element.EnumerateArray())
+                if (FindKimiUsage(child) is KimiUsage found) return found;
+        }
+        return null;
+    }
+
+    static double? PercentageFromRemaining(JsonElement detail)
+    {
+        if (detail.ValueKind != JsonValueKind.Object) return null;
+        var values = detail.EnumerateObject().ToDictionary(p => p.Name, p => p.Value,
+            StringComparer.OrdinalIgnoreCase);
+        var remaining = Number(values, "remaining");
+        var limit = Number(values, "limit");
+        return remaining.HasValue && limit is > 0
+            ? 100.0 * Math.Max(0, limit.Value - remaining.Value) / limit.Value : null;
     }
 
     static double? FindUsage(JsonElement element, bool alibaba)

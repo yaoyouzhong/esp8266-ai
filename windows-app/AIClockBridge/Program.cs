@@ -57,6 +57,17 @@ static class Program
         ApplicationConfiguration.Initialize();
 
         var service = new StatusService();
+        service.CodexCompletion = () => System.Media.SystemSounds.Asterisk.Play();
+        var codexWasForeground = ForegroundApp.IsCodex;
+        using var completionAcknowledger = new System.Threading.Timer(_ =>
+        {
+            var codexIsForeground = ForegroundApp.IsCodex;
+            var returnedToCodex = codexIsForeground && !codexWasForeground;
+            var clickedCurrentCodex = codexIsForeground && service.CodexCompletionActive
+                && SystemIdleTime.Current < TimeSpan.FromMilliseconds(350);
+            if (returnedToCodex || clickedCurrentCodex) service.AcknowledgeCodexCompletion();
+            codexWasForeground = codexIsForeground;
+        }, null, TimeSpan.Zero, TimeSpan.FromMilliseconds(250));
         var usage = new UsageFetcher();
         service.Usage = usage;
         var domesticUsage = new DomesticQuotaService();
@@ -230,6 +241,12 @@ static class Program
         }
         try
         {
+            for (var i = 0; i < 30 && usb.DeviceInfo == null; i++)
+            {
+                usb.RequestInfo();
+                await Task.Delay(100);
+            }
+            if (usb.DeviceInfo == null) throw new Exception("device info handshake did not complete");
             for (var i = 0; i < 150 && (stocks.Snapshot.Length == 0 || weather.Current.UpdatedUtc == 0); i++)
                 await Task.Delay(100);
             if (stocks.Snapshot.Length == 0) throw new Exception("stock feed did not load");
@@ -237,9 +254,13 @@ static class Program
 
             usb.SetDisplayMode("dual");
             await Task.Delay(500);
-            usb.RequestInfo();
-            for (var i = 0; i < 20 && usb.DeviceInfo?.Effective != "dual"; i++) await Task.Delay(100);
-            if (usb.DeviceInfo?.Effective != "dual") throw new Exception("dual quota page did not activate");
+            for (var i = 0; i < 20 && usb.DeviceInfo?.Effective != "dual"; i++)
+            {
+                usb.RequestInfo();
+                await Task.Delay(100);
+            }
+            if (usb.DeviceInfo?.Effective != "dual")
+                throw new Exception($"dual quota page did not activate (effective={usb.DeviceInfo?.Effective ?? "--"}, showing={usb.DeviceInfo?.Showing ?? "--"})");
             Console.Error.WriteLine("[test-usb] dual quota page verified");
 
             usb.SetDisplayMode("screensaver_preview");
@@ -286,11 +307,23 @@ static class Program
             }
             if (usb.DeviceInfo?.Effective != "auto" || usb.DeviceInfo?.Showing != "codex")
                 throw new Exception("Codex completion alert did not activate");
+            var firstCompletionSeq = service.Snapshot().Codex.CompletionSeq;
+            await Task.Delay(100);
+            service.RecordEvent("codex", "Stop");
+            if (service.Snapshot().Codex.CompletionSeq <= firstCompletionSeq)
+                throw new Exception("second Codex completion was not retained");
             await Task.Delay(2800);
             usb.RequestInfo();
-            for (var i = 0; i < 20 && usb.DeviceInfo?.Effective != "stock"; i++) await Task.Delay(100);
+            if (usb.DeviceInfo?.Effective != "auto" || usb.DeviceInfo?.Showing != "codex")
+                throw new Exception("Codex completion alert did not persist before acknowledgement");
+            service.AcknowledgeCodexCompletion();
+            for (var i = 0; i < 30 && usb.DeviceInfo?.Effective != "stock"; i++)
+            {
+                usb.RequestInfo();
+                await Task.Delay(100);
+            }
             if (usb.DeviceInfo?.Effective != "stock") throw new Exception("pinned page did not resume after completion alert");
-            Console.Error.WriteLine("[test-usb] Codex approval/completion alerts verified");
+            Console.Error.WriteLine("[test-usb] persistent multi-completion alert verified");
 
             await Task.Delay(3500);
             Console.Error.WriteLine($"[test-usb] stock page {stocks.Snapshot.Length} row(s), names {stocks.NameBitmap.Length} bytes");

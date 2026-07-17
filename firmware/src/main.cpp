@@ -71,6 +71,7 @@ const int RING_MARGIN = 4;      // inset from screen edge
 const int RING_THICKNESS = 10;  // ring bar thickness
 const unsigned long ANIM_INTERVAL_MS = 120;  // sprite frame advance
 const unsigned long FLASH_INTERVAL_MS = 400; // "urgent" flash speed
+const unsigned long COMPLETION_PULSE_INTERVAL_MS = 140;
 const unsigned long SWITCH_BOTH_MS = 2000;   // both apps working: alternate fast
 const unsigned long SWITCH_IDLE_MS = 6000;   // neither working: alternate slow
 
@@ -86,18 +87,21 @@ DisplayMode displayMode = MODE_AUTO;
 DisplayMode effectiveMode();
 bool screenSaverPreview = false;
 
-const unsigned long COMPLETION_ALERT_MS = 2400;
-unsigned long completionAlertUntilMs = 0;
-bool completionFlashOn = false;
+const uint8_t COMPLETION_PULSE_STEPS = 10;
+uint8_t completionFlashPhase = 0;
+unsigned long completionFlashLastMs = 0;
+uint32_t codexCompletionSeq = 0;
+bool codexCompletionActive = false;
 bool codexCompletionInitialized = false;
 
 bool completionAlertActive() {
-  return (long)(completionAlertUntilMs - millis()) > 0;
+  return codexCompletionActive;
 }
 
 void startCodexCompletionAlert() {
-  completionAlertUntilMs = millis() + COMPLETION_ALERT_MS;
-  completionFlashOn = true;
+  codexCompletionActive = true;
+  completionFlashPhase = 0;
+  completionFlashLastMs = millis() - COMPLETION_PULSE_INTERVAL_MS;
   currentApp = APP_CODEX;
   lastSwitchMs = millis();
 }
@@ -865,6 +869,21 @@ void redrawRingOnly() {
   }
 }
 
+// Draw the persistent completion border on its own short cadence. It continues
+// until the Windows bridge acknowledges that Codex has returned to foreground.
+void drawCompletionPulse(unsigned long nowMs) {
+  if (!completionAlertActive()
+      || nowMs - completionFlashLastMs < COMPLETION_PULSE_INTERVAL_MS) return;
+
+  completionFlashLastMs = nowMs;
+  static const uint8_t brightness[COMPLETION_PULSE_STEPS] = {
+    40, 88, 144, 208, 255, 255, 208, 144, 88, 0
+  };
+  uint8_t level = brightness[completionFlashPhase];
+  drawFullBorder(tft.color565(0, level, 0));
+  completionFlashPhase = (completionFlashPhase + 1) % COMPLETION_PULSE_STEPS;
+}
+
 // Who gets the screen:
 //   - display mode pinned (Mac app) -> that app, always
 //   - exactly one app working       -> that app, immediately
@@ -1144,8 +1163,11 @@ void drawDomesticScreen(bool force = false) {
   const DomesticProviderStatus &p = domesticStatus.active;
   String provider = domesticStatus.activeProvider.length() ? domesticStatus.activeProvider : "qwen";
   provider.toUpperCase();
+  bool isKimi = provider == "KIMI";
   String model = p.model.length() ? fitDomesticText(p.model, 112, 2) : "--";
-  String tokens = formatTokens(p.tokensToday);
+  String tokens = isKimi
+      ? (p.fiveHourPct >= 0 ? String((int)p.fiveHourPct) + "%" : "--")
+      : formatTokens(p.tokensToday);
   String planNumber = p.planPct >= 0
       ? (p.planPctText.length() ? p.planPctText : String((int)p.planPct)) : "--";
   String plan = p.planPct >= 0 ? planNumber + "%" : "--";
@@ -1167,19 +1189,22 @@ void drawDomesticScreen(bool force = false) {
     tft.fillRoundRect(20, 177, 200, 38, 8, panelColor);
     tft.drawRoundRect(20, 177, 200, 38, 8, 0x29A5);
     tft.setTextDatum(TL_DATUM);
-    tft.setTextColor(TFT_GREEN, panelColor);
-    tft.drawString("TODAY", 34, 184, 2);
-    tft.setTextColor(mutedColor, panelColor);
-    tft.drawString("TOKENS", 35, 201, 1);
-    tft.setTextDatum(TC_DATUM);
-    tft.setTextColor(mutedColor, TFT_BLACK);
-    tft.drawString("PLAN", SCREEN_CX, 73, 1);
   }
   drawSquareRing(max(p.planPct, 0.0f), TFT_GREEN);
   if (force || !domesticDrawCache.initialized || provider != domesticDrawCache.provider) {
     tft.fillRect(34, 20, 72, 22, TFT_BLACK);
     tft.setTextDatum(TL_DATUM);
     drawBoldString(provider, 36, 24, 2, TFT_GREEN);
+    tft.fillRect(0, 69, SCREEN_W, 16, TFT_BLACK);
+    tft.setTextDatum(TC_DATUM);
+    tft.setTextColor(mutedColor, TFT_BLACK);
+    tft.drawString(isKimi ? "WEEKLY" : "PLAN", SCREEN_CX, 73, 1);
+    tft.fillRect(28, 181, 76, 31, panelColor);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(TFT_GREEN, panelColor);
+    tft.drawString(isKimi ? "5H" : "TODAY", 34, 184, 2);
+    tft.setTextColor(mutedColor, panelColor);
+    tft.drawString(isKimi ? "USAGE" : "TOKENS", 35, 201, 1);
   }
   if (force || !domesticDrawCache.initialized || model != domesticDrawCache.model) {
     tft.fillRect(106, 20, 114, 22, TFT_BLACK);
@@ -1620,15 +1645,18 @@ uint32_t currentBridgeUtc() {
   return 0;
 }
 
-void drawWeekdayGlyph(int glyph, int x, int y, uint16_t color) {
-  for (int row = 0; row < 18; row++) {
-    uint32_t mask = pgm_read_dword(&WEEKDAY_GLYPHS[glyph][row]);
+void drawWeekdayGlyph(int glyph, int x, int y, uint16_t color, int size = 18) {
+  for (int row = 0; row < size; row++) {
+    int sourceRow = row * 18 / size;
+    uint32_t mask = pgm_read_dword(&WEEKDAY_GLYPHS[glyph][sourceRow]);
     int runStart = -1;
-    for (int col = 0; col <= 18; col++) {
-      bool set = col < 18 && (mask & (1UL << (17 - col)));
+    for (int col = 0; col <= size; col++) {
+      int sourceCol = col < size ? col * 18 / size : 18;
+      bool set = col < size && (mask & (1UL << (17 - sourceCol)));
       if (set && runStart < 0) runStart = col;
       if (!set && runStart >= 0) {
-        tft.fillRect(x + runStart, y + row, col - runStart, 1, color);
+        int width = min(size - runStart, col - runStart + 1);
+        tft.fillRect(x + runStart, y + row, width, 1, color);
         runStart = -1;
       }
     }
@@ -1675,9 +1703,10 @@ void drawScreenSaver(bool force) {
   snprintf(dateBuf, sizeof(dateBuf), "%02d-%02d", month, day);
   tft.setTextDatum(TL_DATUM);
   const int dateFont = 4;
-  int dateW = tft.textWidth(dateBuf, dateFont);
-  const int weekdayW = 38;
-  const int dateLineW = dateW + 8 + weekdayW;
+  const int dateW = tft.textWidth(dateBuf, dateFont) + 1;
+  const int weekdayGlyphSize = 26;
+  const int weekdayW = weekdayGlyphSize * 2 + 2;
+  const int dateLineW = dateW + 10 + weekdayW;
   const int timeW = 204;
   int groupW = max(timeW, dateLineW);
   int groupH = 112;
@@ -1694,22 +1723,25 @@ void drawScreenSaver(bool force) {
   int timeX = x + (groupW - timeW) / 2;
   const int digitX[] = { timeX, timeX + 47, timeX + 115, timeX + 162 };
   const int digitValue[] = { hour / 10, hour % 10, minute / 10, minute % 10 };
+  const uint16_t dateColor = 0xC618; // soft white-grey
+  const uint16_t accentColor = TFT_YELLOW;
   for (int i = 0; i < 4; i++) drawScreenSaverDigit(digitValue[i], digitX[i], y, TFT_CYAN);
   // Exact centre of the 26px gap between the hour and minute groups, and
   // vertically symmetric around the 76px digit centre (y + 38).
-  tft.fillCircle(timeX + 102, y + 26, 5, TFT_CYAN);
-  tft.fillCircle(timeX + 102, y + 50, 5, TFT_CYAN);
-  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.fillCircle(timeX + 102, y + 26, 5, accentColor);
+  tft.fillCircle(timeX + 102, y + 50, 5, accentColor);
   // Centre the date under the actually lit clock, not the four fixed digit
   // cells. From 10:00-19:59 the leading "1" starts 33px inside its cell,
   // which otherwise makes the visible clock look right-shifted.
   int firstDigitVisibleLeft = hour / 10 == 1 ? 33 : 0;
   int timeVisibleCenter = timeX + (firstDigitVisibleLeft + timeW) / 2;
   int dateX = timeVisibleCenter - dateLineW / 2;
-  tft.drawString(dateBuf, dateX, y + 80, dateFont);
-  int weekdayX = dateX + dateW + 8;
-  drawWeekdayGlyph(0, weekdayX, y + 84, TFT_DARKGREY);
-  drawWeekdayGlyph(weekday + 1, weekdayX + 20, y + 84, TFT_DARKGREY);
+  tft.setTextDatum(TL_DATUM);
+  drawBoldString(dateBuf, dateX, y + 80, dateFont, dateColor);
+  int weekdayX = dateX + dateW + 10;
+  drawWeekdayGlyph(0, weekdayX, y + 80, dateColor, weekdayGlyphSize);
+  drawWeekdayGlyph(weekday + 1, weekdayX + weekdayGlyphSize + 2, y + 80,
+                   accentColor, weekdayGlyphSize);
   screenSaverOldX = x;
   screenSaverOldY = y;
   screenSaverOldW = groupW;
@@ -1732,7 +1764,9 @@ void drawWeatherDigit(int digit, int x, int y, uint16_t color) {
 
 void drawWeatherClock() {
   if (!weatherStatus.loaded) return;
-  uint32_t utc = weatherStatus.epochUtc + (millis() - weatherSyncMs) / 1000;
+  // Prefer the frequently refreshed bridge clock. The weather timestamp can
+  // legitimately be old when the network is down and cached data is shown.
+  uint32_t utc = currentBridgeUtc();
   int year, month, day, hour, minute, second, weekday;
   epochToLocal(utc, weatherStatus.utcOffsetS, year, month, day, hour, minute, second, weekday);
   String hourText = String(hour < 10 ? "0" : "") + String(hour);
@@ -1894,35 +1928,36 @@ void drawWeatherPlantAnimation() {
 
 void drawWeatherPetAnimation() {
   const int phase = weatherAnimFrame % 12;
+  const int petY = -6; // align the paws with the humidity row's lower edge
   const bool blink = phase == 0 || phase == 1;
   const uint16_t fur = weatherStatus.icon == 5 ? TFT_LIGHTGREY : TFT_ORANGE;
   // Only erase pixels that can move. Clearing the full 88x76 area before
   // repainting the large pet made the black intermediate frame visible.
   tft.fillRect(148, 152, 88, 28, TFT_BLACK);
-  tft.fillRect(207, 193, 22, 24, TFT_BLACK);
+  tft.fillRect(207, 193 + petY, 22, 24, TFT_BLACK);
   // Curled tail swishes behind the body.
   int tailLift = phase < 6 ? phase / 2 : (11 - phase) / 2;
-  tft.drawLine(207, 210, 219, 207 - tailLift, fur);
-  tft.drawLine(219, 207 - tailLift, 224, 198 + tailLift, fur);
-  tft.fillEllipse(190, 208, 20, 16, fur);
+  tft.drawLine(207, 210 + petY, 219, 207 + petY - tailLift, fur);
+  tft.drawLine(219, 207 + petY - tailLift, 224, 198 + petY + tailLift, fur);
+  tft.fillEllipse(190, 208 + petY, 20, 16, fur);
   // Head, ears and paws.
-  tft.fillTriangle(173, 181, 178, 166, 184, 181, fur);
-  tft.fillTriangle(196, 181, 203, 166, 207, 183, fur);
-  tft.fillRoundRect(174, 176, 34, 29, 10, fur);
-  tft.fillEllipse(180, WEATHER_ANIM_BOTTOM - 4, 9, 4, TFT_LIGHTGREY);
-  tft.fillEllipse(201, WEATHER_ANIM_BOTTOM - 4, 9, 4, TFT_LIGHTGREY);
+  tft.fillTriangle(173, 181 + petY, 178, 166 + petY, 184, 181 + petY, fur);
+  tft.fillTriangle(196, 181 + petY, 203, 166 + petY, 207, 183 + petY, fur);
+  tft.fillRoundRect(174, 176 + petY, 34, 29, 10, fur);
+  tft.fillEllipse(180, WEATHER_ANIM_BOTTOM - 4 + petY, 9, 4, TFT_LIGHTGREY);
+  tft.fillEllipse(201, WEATHER_ANIM_BOTTOM - 4 + petY, 9, 4, TFT_LIGHTGREY);
   // Face alternates between open eyes and a blink.
   if (blink) {
-    tft.drawFastHLine(180, 187, 7, TFT_BLACK);
-    tft.drawFastHLine(196, 187, 7, TFT_BLACK);
+    tft.drawFastHLine(180, 187 + petY, 7, TFT_BLACK);
+    tft.drawFastHLine(196, 187 + petY, 7, TFT_BLACK);
   } else {
-    tft.fillCircle(183, 187, 3, TFT_BLACK);
-    tft.fillCircle(199, 187, 3, TFT_BLACK);
-    tft.drawPixel(184, 186, TFT_WHITE); tft.drawPixel(200, 186, TFT_WHITE);
+    tft.fillCircle(183, 187 + petY, 3, TFT_BLACK);
+    tft.fillCircle(199, 187 + petY, 3, TFT_BLACK);
+    tft.drawPixel(184, 186 + petY, TFT_WHITE); tft.drawPixel(200, 186 + petY, TFT_WHITE);
   }
-  tft.fillTriangle(188, 193, 194, 193, 191, 197, TFT_MAGENTA);
-  tft.drawLine(191, 197, 188, 200, TFT_BLACK);
-  tft.drawLine(191, 197, 194, 200, TFT_BLACK);
+  tft.fillTriangle(188, 193 + petY, 194, 193 + petY, 191, 197 + petY, TFT_MAGENTA);
+  tft.drawLine(191, 197 + petY, 188, 200 + petY, TFT_BLACK);
+  tft.drawLine(191, 197 + petY, 194, 200 + petY, TFT_BLACK);
   // Weather-reactive detail around the pet.
   if (weatherStatus.icon == 4) {
     for (int i = 0; i < 4; i++) {
@@ -2083,12 +2118,22 @@ bool parseStatusJson(const String &payload) {
     codexStatus.weeklyResetMin = x["weekly_reset_min"] | -1;
     codexStatus.needsInput = x["needs_input"] | false;
     uint32_t incomingCompletionAt = x["completion_at"] | 0UL;
+    uint32_t incomingCompletionSeq = x["completion_seq"] | incomingCompletionAt;
+    bool incomingCompletionActive = x["completion_active"] | false;
     if (!codexCompletionInitialized) {
       codexCompletionInitialized = true;
       codexStatus.completionAt = incomingCompletionAt;
-    } else if (incomingCompletionAt > codexStatus.completionAt) {
-      codexStatus.completionAt = incomingCompletionAt;
-      startCodexCompletionAlert();
+      codexCompletionSeq = incomingCompletionSeq;
+      if (incomingCompletionActive) startCodexCompletionAlert();
+    } else {
+      bool wasActive = codexCompletionActive;
+      if (incomingCompletionSeq > codexCompletionSeq) {
+        codexCompletionSeq = incomingCompletionSeq;
+        codexStatus.completionAt = incomingCompletionAt;
+        if (incomingCompletionActive) startCodexCompletionAlert();
+      }
+      codexCompletionActive = incomingCompletionActive;
+      if (wasActive && !codexCompletionActive) redrawRingOnly();
     }
   }
   JsonObject d = doc["domestic"];
@@ -3490,6 +3535,10 @@ void loop() {
   } else if (eff == MODE_SCREENSAVER) {
     drawScreenSaver(false);
   } else {
+    // Completion uses a dedicated 70ms pulse timer. Paint it before the pet
+    // frame so it is not coupled to the slower urgent-alert cadence.
+    if (!bridgeStale() && !currentAppNeedsInput()) drawCompletionPulse(nowMs);
+
     // sprite walk-cycle animation (only advances while that app is showing)
     if (nowMs - lastAnimMs >= ANIM_INTERVAL_MS) {
       lastAnimMs = nowMs;
@@ -3514,7 +3563,8 @@ void loop() {
     }
 
     // "urgent" flash toggle (independent, faster cadence)
-    if (nowMs - lastFlashMs >= FLASH_INTERVAL_MS) {
+    if ((!completionAlertActive() || bridgeStale() || currentAppNeedsInput())
+        && nowMs - lastFlashMs >= FLASH_INTERVAL_MS) {
       lastFlashMs = nowMs;
       flashOn = !flashOn;
       if (bridgeStale()) {
@@ -3523,10 +3573,6 @@ void loop() {
         // approval needed: blink the whole border red, restore the quota ring
         // on the off-phase so it doesn't erase the normal chrome permanently
         if (flashOn) drawFullBorder(TFT_RED);
-        else redrawRingOnly();
-      } else if (completionAlertActive()) {
-        completionFlashOn = !completionFlashOn;
-        if (completionFlashOn) drawFullBorder(TFT_GREEN);
         else redrawRingOnly();
       }
     }

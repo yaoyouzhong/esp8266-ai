@@ -7,9 +7,9 @@ Windows 版功能：
 
 - **左键托盘图标** → ESP8266 屏幕实时镜像（账号套餐徽标 + 额度环 + 桌宠动画 + 国产模型
   聚合页 + 系统监控 + 音乐页，与设备渲染同一份数据），底部附
-  自动/Claude/Codex/额度总览/国产/系统监控/天气/股票 快速切换
+  自动/Claude/Codex/双额度/国产/系统监控/天气/股票 快速切换
 - **右键托盘图标** → 控制菜单按模型额度、设备连接、显示模式、循环展示、内容设置、桌宠与外观、桥接服务分类；
-  循环展示可勾选额度总览、Claude、Codex、天气、股票、国产模型、音乐、系统监控等页面，并选择 10/15/30/60 秒间隔。
+  循环展示可勾选 Claude + Codex 额度、Claude、Codex、天气、股票、国产模型、音乐、系统监控等页面，并选择 10/15/30/60 秒间隔。
   启用时如未勾选页面，默认轮播 Codex、Claude、天气、股票；手动切换页面会自动停止循环。
 - **自动屏保**：在「显示模式 → 屏保设置」选择关闭或 1/5/10/30/60 分钟，也可立即预览。
   计时依据 Windows 真实键鼠空闲时间；键鼠恢复会退出并恢复原页面，AI 工作或审批提醒会
@@ -18,7 +18,9 @@ Windows 版功能：
   不会被当前正在工作的桌宠或键鼠输入打断，固定展示 5 秒后自动恢复原页面。屏保以七段液晶数字显示时间，每
   5 秒移动刷新一次，下方显示日期和中文星期。
 - **Codex 动作提醒**：`PermissionRequest` 会从任意固定页面切到 Codex，并以整圈红色边框闪烁；
-  明确的 `Stop` 事件会触发约 2.4 秒绿色边框脉冲和桌宠动画。提醒结束后自动恢复原固定页面。
+  桥接同时识别 Codex Desktop 会话 JSONL 的 `task_complete` 和 Hook 的 `Stop`，触发四边
+  播放一次 Windows 系统提示音，同时持续显示完整绿框的平滑脉冲和桌宠动画；多个完成事件合并保持提醒，切回 Codex 或开始下一轮任务后恢复真实额度进度环和原固定页面，不要求修改 Codex Desktop 的
+  `notify` 配置。
 - 本地 HTTP 服务 `0.0.0.0:8765`：`/status`、`/net`、`/music`、`/stock`、`/weather` 及其
   RGB565 中文位图端点、`POST /event`（Claude Code / Codex hooks 秒级状态推送）
 
@@ -26,15 +28,16 @@ Windows 版功能：
 额度窗口按返回的实际时长识别，因此供应商临时关闭 5h 限制时会显示 `5h -`，周额度仍正常显示并驱动进度环。
 额度请求暂时失败时继续显示最近一次成功结果；该结果会缓存在 `%APPDATA%\AIClockBridge\usage-cache.json`，
 因此断网重启 Windows 后也不会立刻变成空白。下次请求成功时自动覆盖缓存并更新屏幕。
-- **国产模型聚合页**：识别 Claude Code JSONL 中实际使用的千问（`qwen*`）和小米 MiMo
+- **国产模型显示页**：在「显示模式 → 国产模型」子菜单中单选厂商；识别 Claude Code JSONL 中实际使用的千问（`qwen*`）和小米 MiMo
   （`mimo*`）模型，显示最近模型名和本机日志中的今日 token。这个数字只覆盖写入 Claude
   Code 会话日志的调用，不等于同一个 Token Plan 被所有应用消耗的总量。Token Plan、5h、
   Weekly 只有供应商返回可验证的真实值时才显示，不拿会话时长伪造百分比。Claude 页只统计
   `claude-*` 模型，不把通过 Claude Code 客户端调用的千问算成 Claude 用量。
-- **国产模型额度授权**：左侧厂商导航列出阿里云百炼、小米 MiMo、智谱、火山方舟、
+- **国产模型额度授权**：左侧厂商导航列出阿里云百炼、月之暗面、小米 MiMo、智谱、火山方舟、
   月之暗面、MiniMax、DeepSeek、百度千帆、腾讯混元、华为盘古、讯飞星火、阶跃星辰、
-  百川和零一万物。阿里云百炼已实机验证准确 Token Plan 捕获；小米已预留响应规则但尚未用
-  真实订阅账号验证，其余厂商提供登录入口并明确标为待接。阿里云登录状态保留 30 天，
+  百川和零一万物。阿里云百炼与月之暗面已接通准确额度捕获：前者显示 Token Plan，后者显示
+  Kimi Coding Plan Weekly/5h；小米已预留响应规则但尚未用真实订阅账号验证。其余厂商提供
+  登录入口并明确标为待接。打开授权页时会直接进入当前单选厂商。阿里和 Kimi 登录状态保留 30 天，
   每次成功读取自动续期；供应商主动撤销会话后需要重新登录。
 - **USB 优先桥接**：小时钟经 CH340 数据线连接时，App 自动识别 COM 口并通过
   460800 串口下发状态、网速、完整音乐画面、天气、股票，以及显示模式/亮度控制；GIF 桌宠上传和镜像
@@ -47,8 +50,12 @@ Windows 版功能：
 - 音乐页读系统级 Now Playing（WinRT `GlobalSystemMediaTransportControlsSessionManager`，
   Spotify / 浏览器 / 本地播放器都能识别）；网速取物理网卡（以太网/WiFi）字节计数，
   4Hz 采样，排除 VPN/虚拟网卡
-- 天气页通过 Open-Meteo 获取城市实时天气和空气质量，每 15 分钟刷新；失败时继续使用
-  `%APPDATA%\AIClockBridge\weather-cache.json` 的最近成功值。股票页支持 A股/港股/美股，
+- 天气页每 15 分钟刷新。配置和风天气 API Host 与 API KEY 后，实时天气和当日高低温优先
+  使用和风天气，空气质量接口不可用时单独回退 Open-Meteo；和风主请求失败时整页回退
+  Open-Meteo。地区支持手动输入到区县，或经用户授权读取一次 Windows 定位坐标；全部网络
+  请求失败时继续使用 `%APPDATA%\AIClockBridge\weather-cache.json` 的最近成功值。API KEY
+  存在 Windows 凭据管理器目标 `AIClockBridge/QWeatherApiKey`，不进入设置文件、缓存或日志。
+  股票页支持 A股/港股/美股，
   优先使用腾讯行情，失败时切换新浪行情；两者都失败则保留最近成功值。默认上证指数
   `sh000001`，最多显示 4 只
 - petdex manifest 和 spritesheet 下载会同时尝试系统代理与直连；manifest 成功后缓存到
@@ -99,7 +106,7 @@ windows-app\AIClockBridge\bin\Release\net8.0-windows10.0.19041.0\AIClockBridge.e
 
 | 路径 | 内容 |
 |---|---|
-| `%APPDATA%\AIClockBridge\settings.json` | 设备地址、串口和显示/循环/屏保/天气设置 |
+| `%APPDATA%\AIClockBridge\settings.json` | 设备地址、串口和显示/循环/屏保/天气非敏感设置；不含 API KEY |
 | `%APPDATA%\AIClockBridge\usage-cache.json` | Claude/Codex 最近一次成功额度，不含凭据 |
 | `%APPDATA%\AIClockBridge\domestic-quota-cache.json` | 国产模型最近一次准确额度，不含 Cookie |
 | `%APPDATA%\AIClockBridge\weather-cache.json` | 最近一次成功天气 |
@@ -125,6 +132,8 @@ windows-app\AIClockBridge\bin\Release\net8.0-windows10.0.19041.0\AIClockBridge.e
 | `NowPlayingMonitor.cs` | `NowPlayingMonitor.swift` | 系统 Now Playing + 封面/文字条 RGB565 |
 | `StockMonitor.cs` | — | 自选股行情 + 中文名称 RGB565 |
 | `WeatherMonitor.cs` | — | 城市天气/空气质量 + 断网缓存 + 中文标题 RGB565 |
+| `WeatherSettingsForm.cs` | — | 和风数据源、手动区县、Windows 自动定位和连接测试 |
+| `CredentialStore.cs` | — | Windows 凭据管理器读写，不把供应商密钥落入 JSON |
 | `DeviceClient.cs` | `DeviceClient.swift` | 设备 HTTP API + 自动配对/子网扫描 |
 | `MiniHttpServer.cs` | `HTTPServer.swift` | 0.0.0.0:8765 极简 HTTP 服务 |
 | `Rgb565.cs` | （MirrorPopover 内联） | RGB565 大端编解码 |

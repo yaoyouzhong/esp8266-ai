@@ -12,18 +12,19 @@ sealed class TrayAppContext : ApplicationContext
     const string CycleEnabledKey = "display_cycle_enabled";
     const string CyclePagesKey = "display_cycle_pages";
     const string CycleIntervalKey = "display_cycle_interval_seconds";
+    const string DomesticProviderKey = "domestic_provider";
     const string ScreenSaverTimeoutKey = "screensaver_timeout_minutes";
     const string ScreenSaverPreviousModeKey = "screensaver_previous_mode";
     static readonly (string Title, string Mode)[] DisplayModes =
     {
         ("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
-        ("固定 Codex", "codex"), ("额度总览", "dual"), ("国产模型", "domestic"),
+        ("固定 Codex", "codex"), ("Claude + Codex 额度", "dual"), ("国产模型", "domestic"),
         ("系统监控", "net"), ("音乐播放", "music"), ("股票行情", "stock"),
         ("天气时钟", "weather"),
     };
     static readonly (string Title, string Mode)[] CycleModes =
     {
-        ("额度总览", "dual"), ("Codex", "codex"), ("Claude", "claude"), ("天气时钟", "weather"),
+        ("Claude + Codex 额度", "dual"), ("Codex", "codex"), ("Claude", "claude"), ("天气时钟", "weather"),
         ("股票行情", "stock"), ("国产模型", "domestic"), ("音乐播放", "music"),
         ("系统监控", "net"),
     };
@@ -44,6 +45,7 @@ sealed class TrayAppContext : ApplicationContext
     readonly ToolStripMenuItem _deviceInfoItem = new("设备：未设置") { Enabled = false };
     readonly ToolStripMenuItem _startupItem = new("随 Windows 启动") { CheckOnClick = false };
     readonly Dictionary<string, ToolStripMenuItem> _modeItems = new();
+    readonly Dictionary<string, ToolStripMenuItem> _domesticProviderItems = new();
     readonly ToolStripMenuItem _cycleEnabledItem = new("启用循环展示");
     readonly Dictionary<string, ToolStripMenuItem> _cyclePageItems = new();
     readonly Dictionary<int, ToolStripMenuItem> _cycleIntervalItems = new();
@@ -62,6 +64,7 @@ sealed class TrayAppContext : ApplicationContext
     bool _screenSaverPreviewActive;
     string _modeBeforeScreenSaver = "auto";
     string _lastKnownMode = "auto";
+    string _domesticProvider = "qwen";
     DateTime _lastScreenSaverActivityAt = DateTime.UtcNow;
     DateTime _ignoreScreenSaverWakeUntil = DateTime.MinValue;
 
@@ -79,6 +82,7 @@ sealed class TrayAppContext : ApplicationContext
         _mirror = new MirrorForm(service, netMonitor, nowPlaying, stocks, weather);
 
         LoadCycleSettings();
+        LoadDomesticProviderSettings();
         LoadScreenSaverSettings();
         _cycleTimer.Tick += async (_, _) => await AdvanceCycle();
         _screenSaverTimer.Tick += async (_, _) => await ScreenSaverTick();
@@ -134,7 +138,7 @@ sealed class TrayAppContext : ApplicationContext
         quotaMenu.DropDownItems.Add(new ToolStripSeparator());
         var domesticAuthorization = new ToolStripMenuItem("国产模型额度授权…");
         domesticAuthorization.Click += (_, _) =>
-            _menu.BeginInvoke(_domesticUsage.OpenAuthorization);
+            _menu.BeginInvoke(() => _domesticUsage.OpenAuthorization(_domesticProvider));
         quotaMenu.DropDownItems.Add(domesticAuthorization);
         _menu.Items.Add(quotaMenu);
 
@@ -150,6 +154,25 @@ sealed class TrayAppContext : ApplicationContext
         var displayMenu = new ToolStripMenuItem("显示模式");
         foreach (var (title, mode) in DisplayModes)
         {
+            if (mode == "domestic")
+            {
+                var domesticMenu = new ToolStripMenuItem(title);
+                foreach (var provider in DomesticProviderCatalog.All)
+                {
+                    var providerTitle = provider.CaptureSupported
+                        ? provider.Name : $"{provider.Name}（待接）";
+                    var providerItem = new ToolStripMenuItem(providerTitle);
+                    providerItem.Click += async (_, _) => await SetDomesticProvider(provider.Id);
+                    KeepOpenOnClick(providerItem);
+                    _domesticProviderItems[provider.Id] = providerItem;
+                    domesticMenu.DropDownItems.Add(providerItem);
+                }
+                KeepOpenWhileSetting(domesticMenu.DropDown);
+                _modeItems[mode] = domesticMenu;
+                displayMenu.DropDownItems.Add(domesticMenu);
+                UpdateDomesticProviderMenu();
+                continue;
+            }
             var item = new ToolStripMenuItem(title);
             item.Click += async (_, _) => await SetDisplayMode(mode);
             _modeItems[mode] = item;
@@ -218,12 +241,8 @@ sealed class TrayAppContext : ApplicationContext
             _stocks.Refresh();
         }));
         var weatherMenu = new ToolStripMenuItem("天气设置");
-        weatherMenu.DropDownItems.Add(MakeItem("设置天气城市…", (_, _) =>
-        {
-            var input = InputDialog.Show("天气城市", "输入城市名，例如 上海、北京、济南。保存后立即刷新天气。",
-                WeatherMonitor.City, "上海");
-            if (input != null) _weather.SetCity(input);
-        }));
+        weatherMenu.DropDownItems.Add(MakeItem("数据源与定位…", (_, _) =>
+            _menu.BeginInvoke(OpenWeatherSettings)));
         var weatherAnimationMenu = new ToolStripMenuItem("右下角动画");
         foreach (var (title, animation) in new[]
         {
@@ -314,6 +333,29 @@ sealed class TrayAppContext : ApplicationContext
         _cycleIntervalSeconds = int.TryParse(Settings.Get(CycleIntervalKey), out var seconds)
             && new[] { 10, 15, 30, 60 }.Contains(seconds) ? seconds : 15;
         _cycleTimer.Interval = _cycleIntervalSeconds * 1000;
+    }
+
+    void LoadDomesticProviderSettings()
+    {
+        var configured = Settings.Get(DomesticProviderKey);
+        _domesticProvider = DomesticProviderCatalog.All.Any(x => x.Id == configured)
+            ? configured : "qwen";
+        _service.DomesticProviderOverride = _domesticProvider;
+    }
+
+    void UpdateDomesticProviderMenu()
+    {
+        foreach (var (id, item) in _domesticProviderItems)
+            item.Checked = id == _domesticProvider;
+    }
+
+    async Task SetDomesticProvider(string provider)
+    {
+        _domesticProvider = provider;
+        _service.DomesticProviderOverride = provider;
+        Settings.Set(DomesticProviderKey, provider);
+        UpdateDomesticProviderMenu();
+        await SetDisplayMode("domestic");
     }
 
     void LoadScreenSaverSettings()
@@ -610,6 +652,7 @@ sealed class TrayAppContext : ApplicationContext
         var showing = info.Mode == "net" ? "系统监控"
             : info.Mode == "music" ? "音乐"
             : info.Mode == "domestic" ? "国产模型"
+            : info.Mode == "dual" ? "Claude + Codex 额度"
             : info.Mode == "stock" ? "股票"
             : info.Mode == "weather" ? "天气"
             : info.Mode == "screensaver" ? "屏保"
@@ -730,6 +773,12 @@ sealed class TrayAppContext : ApplicationContext
         var ip = DeviceClient.LocalIPv4() ?? "<本机局域网IP>";
         Toast("桥接服务地址",
               $"http://{ip}:{_port}/status\n\n设备端 Bridge host 填：{ip}:{_port}");
+    }
+
+    void OpenWeatherSettings()
+    {
+        using var form = new WeatherSettingsForm(_weather);
+        form.ShowDialog();
     }
 
     void ToggleStartup()

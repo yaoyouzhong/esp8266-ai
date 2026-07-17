@@ -219,12 +219,16 @@ sealed class MirrorControl : Control
     {
         var now = DateTime.Now;
         var utc = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        using var dateFont = new Font("Microsoft YaHei UI", 17, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var dateFont = new Font("Microsoft YaHei UI", 19, FontStyle.Bold, GraphicsUnit.Pixel);
         var weekdays = "日一二三四五六";
-        var date = $"{now:MM-dd} 周{weekdays[(int)now.DayOfWeek]}";
-        var dateW = (int)Math.Ceiling(g.MeasureString(date, dateFont).Width);
+        var date = $"{now:MM-dd}";
+        var weekday = $"周{weekdays[(int)now.DayOfWeek]}";
+        using var textFormat = (StringFormat)StringFormat.GenericTypographic.Clone();
+        var dateW = (int)Math.Ceiling(g.MeasureString(date, dateFont, int.MaxValue, textFormat).Width);
+        var weekdayW = (int)Math.Ceiling(g.MeasureString(weekday, dateFont, int.MaxValue, textFormat).Width);
+        var dateLineW = dateW + 8 + weekdayW;
         const int timeW = 204;
-        var groupW = Math.Max(timeW, dateW);
+        var groupW = Math.Max(timeW, dateLineW);
         const int groupH = 112;
         var rangeX = Math.Max(1, 240 - groupW - 12);
         var rangeY = Math.Max(1, 240 - groupH - 24);
@@ -234,18 +238,19 @@ sealed class MirrorControl : Control
         var x = 6 + (phaseX <= rangeX ? phaseX : rangeX * 2 - phaseX);
         var y = 12 + (phaseY <= rangeY ? phaseY : rangeY * 2 - phaseY);
         using var cyan = new SolidBrush(Color.Cyan);
-        using var grey = new SolidBrush(Color.FromArgb(105, 105, 105));
+        using var dateBrush = new SolidBrush(Color.FromArgb(198, 203, 198));
+        using var accent = new SolidBrush(Color.FromArgb(255, 214, 10));
         var timeX = x + (groupW - timeW) / 2f;
         var digitX = new[] { timeX, timeX + 47, timeX + 115, timeX + 162 };
         var digitValue = new[] { now.Hour / 10, now.Hour % 10, now.Minute / 10, now.Minute % 10 };
         for (var i = 0; i < digitX.Length; i++) DrawLcdDigit(g, digitValue[i], digitX[i], y, cyan);
-        g.FillEllipse(cyan, timeX + 97, y + 21, 10, 10);
-        g.FillEllipse(cyan, timeX + 97, y + 45, 10, 10);
-        using var center = new StringFormat { Alignment = StringAlignment.Center };
+        g.FillEllipse(accent, timeX + 97, y + 21, 10, 10);
+        g.FillEllipse(accent, timeX + 97, y + 45, 10, 10);
         var firstDigitVisibleLeft = now.Hour / 10 == 1 ? 33 : 0;
         var timeVisibleCenter = timeX + (firstDigitVisibleLeft + timeW) / 2f;
-        g.DrawString(date, dateFont, grey,
-            new RectangleF(timeVisibleCenter - dateW / 2f, y + 80, dateW, 24), center);
+        var dateX = timeVisibleCenter - dateLineW / 2f;
+        g.DrawString(date, dateFont, dateBrush, dateX, y + 81, textFormat);
+        g.DrawString(weekday, dateFont, accent, dateX + dateW + 8, y + 81, textFormat);
     }
 
     static void DrawLcdDigit(Graphics g, int digit, float x, float y, Brush brush)
@@ -297,9 +302,15 @@ sealed class MirrorControl : Control
         var p = Domestic.Active.Model.Length > 0 || Domestic.Active.PlanPct.HasValue
             || Domestic.Active.TokensToday > 0
             ? Domestic.Active
-            : Domestic.ActiveProvider == "xiaomi" ? Domestic.Xiaomi : Domestic.Qwen;
+            : Domestic.ActiveProvider switch
+            {
+                "xiaomi" => Domestic.Xiaomi,
+                "kimi" => Domestic.Kimi,
+                _ => Domestic.Qwen,
+            };
         var provider = string.IsNullOrEmpty(Domestic.ActiveProvider)
             ? "QWEN" : Domestic.ActiveProvider.ToUpperInvariant();
+        var isKimi = provider == "KIMI";
         var plan = p.PlanPct.HasValue ? Math.Clamp((int)p.PlanPct.Value, 0, 100) : 0;
         var planNumber = p.PlanPct.HasValue
             ? (p.PlanPctText.Length > 0 ? p.PlanPctText
@@ -348,7 +359,8 @@ sealed class MirrorControl : Control
         g.FillRectangle(mutedBrush, 20, 53, 200, 1);
         g.FillRectangle(greenBrush, 20, 53, 42, 1);
 
-        g.DrawString("PLAN", smallFont, mutedBrush, new RectangleF(0, 69, 240, 16), centered);
+        g.DrawString(isKimi ? "WEEKLY" : "PLAN", smallFont, mutedBrush,
+                     new RectangleF(0, 69, 240, 16), centered);
         var numberSize = g.MeasureString(planNumber, percentFont);
         var suffixWidth = p.PlanPct.HasValue ? g.MeasureString("%", suffixFont).Width + 4 : 0;
         var numberLeft = 120 - (numberSize.Width + suffixWidth) / 2;
@@ -366,10 +378,14 @@ sealed class MirrorControl : Control
             g.FillPath(panelBrush, panel);
         using (var panel = RoundedRect(new RectangleF(20, 177, 200, 38), 8))
             g.DrawPath(panelPen, panel);
-        g.DrawString("TODAY", labelFont, greenBrush, 34, 182);
-        g.DrawString("TOKENS", smallFont, mutedBrush, 35, 200);
+        g.DrawString(isKimi ? "5H" : "TODAY", labelFont, greenBrush, 34, 182);
+        g.DrawString(isKimi ? "USAGE" : "TOKENS", smallFont, mutedBrush, 35, 200);
+        var panelValue = isKimi
+            ? (p.FiveHourPct.HasValue
+                ? $"{(int)Math.Clamp(p.FiveHourPct.Value, 0, 100)}%" : "--")
+            : TokenText(p.TokensToday);
         using (var right = new StringFormat(centered) { Alignment = StringAlignment.Far })
-            g.DrawString(TokenText(p.TokensToday), tokenFont, cyanBrush,
+            g.DrawString(panelValue, tokenFont, cyanBrush,
                          new RectangleF(104, 179, 99, 32), right);
     }
 
@@ -690,7 +706,7 @@ sealed class MirrorForm : Form
     readonly MirrorControl _mirror = new();
     readonly RadioButton[] _modeButtons;
     static readonly string[] Modes = { "auto", "claude", "codex", "dual", "domestic", "net", "weather", "stock" };
-    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "总览", "国产", "监控", "天气", "股票" };
+    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "双额度", "国产", "监控", "天气", "股票" };
     readonly Label _statusLabel = new();
     readonly TrackBar _brightness = new() { Minimum = 0, Maximum = 100, TickStyle = TickStyle.None };
     readonly Label _brightnessValue = new();
@@ -906,7 +922,7 @@ sealed class MirrorForm : Form
             : info.Mode == "net" ? "系统监控"
             : info.Mode == "music" ? "音乐播放"
             : info.Mode == "screensaver" ? "屏保"
-            : info.Mode == "dual" ? "额度总览" : "固定显示";
+            : info.Mode == "dual" ? "Claude + Codex 额度" : "固定显示";
         _statusLabel.Text = $"{info.Ip} · {modeText} · 数据 {info.Bridge}";
     }
 

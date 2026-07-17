@@ -63,7 +63,7 @@ swift run                # 前台运行；或 swift build 后跑 .build/debug/AI
   也会自愈。菜单项走完整流程：最近来访 IP → 已配置地址复验 → 子网 /24 扫描兜底
   （覆盖"刚配完 WiFi、还没设过桥接"的全新设备）。
 - **设置设备地址…**：手动填时钟的 IP（开机时屏幕会显示；有自动配对后基本用不上）
-- **屏幕显示**：自动（谁在干活显示谁）/ 固定 Claude / 固定 Codex / 额度总览 / 国产模型 / 系统监控 / 音乐 / 股票 / 天气
+- **屏幕显示**：自动（谁在干活显示谁）/ 固定 Claude / 固定 Codex / Claude + Codex 额度 / 国产模型 / 系统监控 / 音乐 / 股票 / 天气
 - **音乐播放**：显示 Mac 当前播放的专辑封面、歌曲、歌手和进度
 - **更换桌宠动画…**：内置 [petdex.dev](https://petdex.dev) 画廊（3300+ 开源桌宠），
   搜索 → 选动画（待机/跑步/挥手…9 种）→ 预览 → 一键上传到设备
@@ -158,7 +158,7 @@ pio device monitor -b 460800
 
 ## 3. 屏幕布局
 
-主视图不显示时钟：Claude/Codex 使用桌宠视图，国产模型使用千问 + 小米 MiMo 聚合页。
+主视图不显示时钟：Claude/Codex 使用桌宠视图，国产模型显示当前在厂商子菜单中单选的供应商。
 桌宠视图一次只显示 Claude 或 Codex 其中一个，规则：
 
 - **只有一方在工作** → 固定显示正在工作的那个
@@ -312,13 +312,16 @@ Windows 桥接提供以下只读端点，固件在 Wi-Fi 回退模式下读取�
 |---|---|
 | `GET /stock` | 最多 4 只自选股的代码、价格、涨跌幅和名称版本 |
 | `GET /stock/names.raw` | 4 行股票中文名称 RGB565 位图 |
-| `GET /weather` | 城市、天气、时分秒、最高/最低温、湿度、PM2.5 和动画类型 |
+| `GET /weather` | 城市、天气、时分秒、最高/最低温、湿度、PM2.5 和动画类型；`epoch_utc` 是桥接端当前 UTC，`updated_utc` 是最近成功天气数据的时间，两者不得混用 |
 | `GET /weather/header.raw` | 城市与天气中文位图 |
 | `GET /weather/date.raw` | `M月d日 周X` 中文日期位图 |
 | `GET /weather/air.raw` | 空气质量徽标位图 |
 
-天气每 15 分钟向 Open-Meteo 刷新；股票每 5 秒优先请求腾讯行情、失败后尝试新浪行情。
-网络失败时分别沿用 `%APPDATA%\AIClockBridge\weather-cache.json` 和进程内最近成功行情。
+天气每 15 分钟刷新。Windows 配置和风天气后，以 GeoAPI 解析手动区县或 Windows 定位坐标，
+实时天气和当日高低温使用和风天气；空气质量可独立回退 Open-Meteo，和风主请求失败时整页
+回退 Open-Meteo。API KEY 只保存在 Windows 凭据管理器 `AIClockBridge/QWeatherApiKey`，
+`settings.json` 仅保存 API Host、地区、定位开关和坐标。股票每 5 秒优先请求腾讯行情、失败后
+尝试新浪行情。网络失败时分别沿用 `%APPDATA%\AIClockBridge\weather-cache.json` 和进程内最近成功行情。
 Windows 会把股票名称和天气三块中文位图合并成 RLE 页面缓存推给设备；设备写入 LittleFS，
 切页时可立即显示，不再等待串口重传。`GET /api/info` 的 `ui_cache` 返回缓存状态和 CRC。
 
@@ -326,12 +329,18 @@ Windows 会把股票名称和天气三块中文位图合并成 RLE 页面缓存�
 
 - 模型名和 `tokens_today`：扫描 `%USERPROFILE%\.claude\projects\**\*.jsonl`，所以只统计
   写入 Claude Code 会话日志的调用；其他应用即使共用同一个 Token Plan，也不会计入。
-- Token Plan 百分比：授权窗口在厂商控制台内读取账号页面已经返回的用量响应。阿里云百炼
-  路径已经实机验证，结果缓存到 `%APPDATA%\AIClockBridge\domestic-quota-cache.json`。
+- 订阅百分比：授权窗口在厂商控制台内读取账号页面已经返回的用量响应。阿里云百炼读取
+  Token Plan；月之暗面从 Kimi Coding Plan `BillingService/GetUsages` 响应的 `detail` 与
+  `limits[].detail` 计算 Weekly 和 5h 已用百分比。结果缓存到
+  `%APPDATA%\AIClockBridge\domestic-quota-cache.json`。
 
-阿里云登录使用 `%APPDATA%\AIClockBridge\quota-auth-profile` 的独立 WebView2 profile。
+阿里云和 Kimi 登录使用 `%APPDATA%\AIClockBridge\quota-auth-profile` 的独立 WebView2 profile。
 登录成功后把会话 Cookie 持久化 30 天，每次成功读取额度自动续期；Cookie 值不写入额度
 JSON 缓存或日志。供应商主动撤销会话时仍需重新登录。
+
+「显示模式 → 国产模型」使用同一份 `DomesticProviderCatalog` 生成厂商子菜单，严格单选；
+当前选项写入 `%APPDATA%\AIClockBridge\settings.json` 的 `domestic_provider`。目录列出国内
+主流厂商，未实现准确额度解析的条目显示「待接」，选择后仍进入统一国产模型页面并显示未知额度。
 
 ## 10. Windows 自动屏保
 
@@ -346,8 +355,12 @@ Windows 每秒通过 `GetLastInputInfo` 读取系统键鼠空闲时间，超时�
 
 「立即预览」通过 `screensaver_preview` 强制保持屏保画面，5 秒内忽略 working 状态和键鼠输入，
 到时由 Windows 主动恢复原页面。审批提醒具有全局优先级，即使固定在股票、天气
-等页面也会切到对应桌宠并闪烁红色边框。Codex 只有收到明确的 `Stop` hook 才触发完成提醒：
-绿色边框脉冲并播放约 2.4 秒桌宠动画，随后自动恢复进入提醒前的固定页面。
+等页面也会切到对应桌宠并闪烁红色边框。Codex 收到 `Stop` hook，或桥接在 Codex Desktop
+会话 JSONL 末尾读到新的 `event_msg.payload.type = task_complete` 时触发完成提醒：Windows 播放一次
+系统提示音，设备四边完整绿框以独立 140 ms 节拍持续渐变脉冲并播放桌宠动画。多个任务完成会合并为同一个
+未确认状态；用户把 Codex 窗口切回前台或开始下一轮任务时，桥接清除状态并恢复真实额度进度环和提醒前的
+固定页面。JSONL 检测只读取桥接
+启动后发生变化的文件末尾，不修改或占用 Codex Desktop 自己的 `notify` 配置。
 
 ## 已知限制 / TODO
 

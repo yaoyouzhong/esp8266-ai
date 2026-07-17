@@ -37,6 +37,8 @@ class CodexStatus
     public int? WeeklyResetMin;
     public bool NeedsInput;
     public long CompletionAt; // Unix seconds of the latest explicit Stop event
+    public long CompletionSeq;
+    public bool CompletionActive;
 }
 
 class DomesticProviderStatus
@@ -61,6 +63,7 @@ class DomesticStatus
     public DomesticProviderStatus Active = new();
     public DomesticProviderStatus Qwen = new();
     public DomesticProviderStatus Xiaomi = new();
+    public DomesticProviderStatus Kimi = new();
 }
 
 class StatusSnapshot
@@ -106,6 +109,8 @@ class StatusSnapshot
             WriteNullable(w, "weekly_reset_min", Codex.WeeklyResetMin);
             w.WriteBoolean("needs_input", Codex.NeedsInput);
             w.WriteNumber("completion_at", Codex.CompletionAt);
+            w.WriteNumber("completion_seq", Codex.CompletionSeq);
+            w.WriteBoolean("completion_active", Codex.CompletionActive);
             w.WriteEndObject();
             w.WriteStartObject("domestic");
             w.WriteString("status", Domestic.Status);
@@ -114,6 +119,7 @@ class StatusSnapshot
             WriteDomesticProvider(w, "active", ActiveDomesticProvider(Domestic));
             WriteDomesticProvider(w, "qwen", Domestic.Qwen);
             WriteDomesticProvider(w, "xiaomi", Domestic.Xiaomi);
+            WriteDomesticProvider(w, "kimi", Domestic.Kimi);
             w.WriteEndObject();
             w.WriteEndObject();
         }
@@ -149,7 +155,12 @@ class StatusSnapshot
             || domestic.Active.PlanPct.HasValue || domestic.Active.FiveHourPct.HasValue
             || domestic.Active.WeeklyPct.HasValue)
             return domestic.Active;
-        return domestic.ActiveProvider == "xiaomi" ? domestic.Xiaomi : domestic.Qwen;
+        return domestic.ActiveProvider switch
+        {
+            "xiaomi" => domestic.Xiaomi,
+            "kimi" => domestic.Kimi,
+            _ => domestic.Qwen,
+        };
     }
 
     StatusSnapshot() { }
@@ -176,6 +187,7 @@ class StatusSnapshot
                 Active = (DomesticProviderStatus)Domestic.Active.MemberwiseCloneOf(),
                 Qwen = (DomesticProviderStatus)Domestic.Qwen.MemberwiseCloneOf(),
                 Xiaomi = (DomesticProviderStatus)Domestic.Xiaomi.MemberwiseCloneOf(),
+                Kimi = (DomesticProviderStatus)Domestic.Kimi.MemberwiseCloneOf(),
             },
             Ts = Ts,
             MusicPlaying = MusicPlaying,
@@ -202,11 +214,14 @@ sealed class StatusService
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "projects");
     readonly string _codexDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "sessions");
+    readonly double _startedAt = Now();
 
     /// Real OAuth quota (5h/weekly windows) merged into snapshots when set;
     /// log-derived values remain the fallback for offline use.
     public UsageFetcher Usage;
     public DomesticQuotaService DomesticUsage;
+    public string DomesticProviderOverride = "qwen";
+    public Action CodexCompletion;
 
     /// Whether audio is playing right now (drives the device's AUTO -> music
     /// auto-switch). Set from NowPlayingMonitor in Program.
@@ -227,6 +242,9 @@ sealed class StatusService
     double? _claudeNeedsInputAt;
     double? _codexNeedsInputAt;
     long _codexCompletionAt;
+    double _codexCompletionObservedAt;
+    long _codexCompletionSeq;
+    bool _codexCompletionActive;
     const double WorkingEventTTL = 10 * 60;
     const double IdleEventTTL = 60;
     const double NeedsInputTTL = 5 * 60;
@@ -257,7 +275,7 @@ sealed class StatusService
         {
             var now = Now();
             if (agent == "codex" && ev == "Stop")
-                _codexCompletionAt = (long)now;
+                SetCodexCompletion(now);
             // Claude Notification: flash only for permission prompts, not for
             // "task done / waiting for your input" notifications.
             if (ev == "Notification")
@@ -282,7 +300,12 @@ sealed class StatusService
             var e = new AgentEvent(state, now);
             // any concrete lifecycle event means the prompt (if any) was answered
             if (agent == "claude") { _claudeEvent = e; _claudeNeedsInputAt = null; }
-            else if (agent == "codex") { _codexEvent = e; _codexNeedsInputAt = null; }
+            else if (agent == "codex")
+            {
+                _codexEvent = e;
+                _codexNeedsInputAt = null;
+                if (state == "working") _codexCompletionActive = false;
+            }
         }
     }
 
@@ -333,6 +356,31 @@ sealed class StatusService
         provider.RemainingPctText = remaining.ToString("0.00", CultureInfo.InvariantCulture);
     }
 
+    void SetCodexCompletion(double completionAt)
+    {
+        if (completionAt <= _codexCompletionObservedAt) return;
+        _codexCompletionObservedAt = completionAt;
+        _codexCompletionAt = (long)completionAt;
+        _codexCompletionSeq++;
+        _codexCompletionActive = true;
+        var callback = CodexCompletion;
+        if (callback == null) return;
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try { callback(); } catch { }
+        });
+    }
+
+    public void AcknowledgeCodexCompletion()
+    {
+        lock (_lock) _codexCompletionActive = false;
+    }
+
+    public bool CodexCompletionActive
+    {
+        get { lock (_lock) return _codexCompletionActive; }
+    }
+
     public StatusSnapshot Snapshot()
     {
         lock (_lock)
@@ -380,8 +428,24 @@ sealed class StatusService
                 var du = DomesticUsage.Snapshot;
                 snap.Domestic.Qwen.PlanPct = du.QwenPlanPct;
                 snap.Domestic.Xiaomi.PlanPct = du.XiaomiPlanPct;
+                snap.Domestic.Kimi.PlanPct = du.KimiWeeklyPct;
+                snap.Domestic.Kimi.WeeklyPct = du.KimiWeeklyPct;
+                snap.Domestic.Kimi.FiveHourPct = du.KimiFiveHourPct;
                 SetPercentDisplayText(snap.Domestic.Qwen);
                 SetPercentDisplayText(snap.Domestic.Xiaomi);
+                SetPercentDisplayText(snap.Domestic.Kimi);
+                if (DomesticProviderOverride.Length > 0)
+                {
+                    snap.Domestic.ActiveProvider = DomesticProviderOverride;
+                    var selected = DomesticProviderOverride switch
+                    {
+                        "xiaomi" => snap.Domestic.Xiaomi,
+                        "kimi" => snap.Domestic.Kimi,
+                        "qwen" => snap.Domestic.Qwen,
+                        _ => new DomesticProviderStatus(),
+                    };
+                    snap.Domestic.Active = (DomesticProviderStatus)selected.MemberwiseCloneOf();
+                }
             }
             var domesticIsCurrent = snap.Domestic.ActiveProvider.Length > 0
                 && Math.Max(snap.Domestic.Qwen.LastActivityEpoch,
@@ -399,6 +463,8 @@ sealed class StatusService
             snap.Codex.Status = OverrideStatus(snap.Codex.Status, _codexEvent, now);
             snap.Codex.NeedsInput = NeedsInput(_codexNeedsInputAt, now);
             snap.Codex.CompletionAt = _codexCompletionAt;
+            snap.Codex.CompletionSeq = _codexCompletionSeq;
+            snap.Codex.CompletionActive = _codexCompletionActive;
             snap.MusicPlaying = MusicPlayingProvider?.Invoke() ?? false;
             return snap;
         }
@@ -479,6 +545,44 @@ sealed class StatusService
         if (m.StartsWith("qwen") || m.Contains("/qwen")) return "qwen";
         if (m.StartsWith("mimo") || m.Contains("/mimo") || m.Contains("xiaomi")) return "xiaomi";
         return "";
+    }
+
+    static double LatestCodexTaskComplete(string path, double afterEpoch)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
+                                          FileShare.ReadWrite | FileShare.Delete);
+            const int tailBytes = 128 * 1024;
+            var tailStart = Math.Max(0, fs.Length - tailBytes);
+            fs.Seek(tailStart, SeekOrigin.Begin);
+            using var reader = new StreamReader(fs, Encoding.UTF8);
+            if (tailStart > 0) reader.ReadLine(); // discard a partial UTF-8/JSON line
+            double latest = 0;
+            string line;
+            while ((line = reader.ReadLine()) != null)
+            {
+                if (!line.Contains("\"task_complete\"", StringComparison.Ordinal)) continue;
+                try
+                {
+                    using var doc = JsonDocument.Parse(line);
+                    var root = doc.RootElement;
+                    if (!TryProp(root, "payload", out var payload)
+                        || StringVal(payload, "type") != "task_complete") continue;
+                    var timestamp = ParseIso(StringVal(root, "timestamp")) ?? 0;
+                    if (timestamp >= afterEpoch && timestamp > latest) latest = timestamp;
+                }
+                catch
+                {
+                    // The final line may still be in flight; the next scan retries it.
+                }
+            }
+            return latest;
+        }
+        catch
+        {
+            return 0;
+        }
     }
 
     ClaudeStatus ReadClaude(out DomesticStatus domestic)
@@ -607,6 +711,7 @@ sealed class StatusService
     {
         var now = Now();
         double lastMtime = 0;
+        double latestTaskComplete = 0;
 
         // Whole-tree scan just for the freshest mtime (drives working/idle).
         if (Directory.Exists(_codexDir))
@@ -618,12 +723,22 @@ sealed class StatusService
                     var mtime = new DateTimeOffset(File.GetLastWriteTimeUtc(file), TimeSpan.Zero)
                         .ToUnixTimeMilliseconds() / 1000.0;
                     if (mtime > lastMtime) lastMtime = mtime;
+                    if (mtime >= _startedAt)
+                        latestTaskComplete = Math.Max(latestTaskComplete,
+                            LatestCodexTaskComplete(file, _startedAt));
                 }
             }
             catch
             {
                 // partial scan is fine
             }
+        }
+
+        if (latestTaskComplete > _codexCompletionObservedAt)
+        {
+            SetCodexCompletion(latestTaskComplete);
+            _codexEvent = new AgentEvent("idle", latestTaskComplete);
+            _codexNeedsInputAt = null;
         }
 
         // Tokens + rate limits only from today's day directory.
