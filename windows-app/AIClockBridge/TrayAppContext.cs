@@ -141,7 +141,7 @@ sealed class TrayAppContext : ApplicationContext
         quotaMenu.DropDownItems.Add(_claudeUsageItem);
         quotaMenu.DropDownItems.Add(_codexUsageItem);
         quotaMenu.DropDownItems.Add(new ToolStripSeparator());
-        var domesticAuthorization = new ToolStripMenuItem("国产模型额度授权…");
+        var domesticAuthorization = new ToolStripMenuItem("国产模型额度授权");
         domesticAuthorization.Click += (_, _) =>
             _menu.BeginInvoke(() => _domesticUsage.OpenAuthorization(_domesticProvider));
         quotaMenu.DropDownItems.Add(domesticAuthorization);
@@ -151,7 +151,7 @@ sealed class TrayAppContext : ApplicationContext
         deviceMenu.DropDownItems.Add(_deviceInfoItem);
         deviceMenu.DropDownItems.Add(new ToolStripSeparator());
         deviceMenu.DropDownItems.Add(MakeItem("自动查找并配对", async (_, _) => await AutoPairAction()));
-        deviceMenu.DropDownItems.Add(MakeItem("设置设备地址…", (_, _) => SetDeviceAddress()));
+        deviceMenu.DropDownItems.Add(MakeItem("设置设备地址", (_, _) => SetDeviceAddress()));
         deviceMenu.DropDownItems.Add(MakeItem("打开设备网页", (_, _) => OpenDevicePage()));
         deviceMenu.DropDownItems.Add(MakeItem("将本机设为桥接", async (_, _) => await PointBridgeHere()));
         _menu.Items.Add(deviceMenu);
@@ -218,8 +218,6 @@ sealed class TrayAppContext : ApplicationContext
             cyclePagesMenu.DropDownItems.Add(item);
         }
         cycleMenu.DropDownItems.Add(cyclePagesMenu);
-        cycleMenu.DropDownItems.Add(MakeItem("调整展示顺序…", (_, _) =>
-            _menu.BeginInvoke(EditCycleOrder)));
         var intervalMenu = new ToolStripMenuItem("切换间隔");
         foreach (var seconds in new[] { 10, 15, 30, 60 })
         {
@@ -230,6 +228,8 @@ sealed class TrayAppContext : ApplicationContext
             intervalMenu.DropDownItems.Add(item);
         }
         cycleMenu.DropDownItems.Add(intervalMenu);
+        cycleMenu.DropDownItems.Add(MakeItem("调整展示顺序", (_, _) =>
+            _menu.BeginInvoke(EditCycleOrder)));
         KeepOpenWhileSetting(_menu);
         KeepOpenWhileSetting(cycleMenu.DropDown);
         KeepOpenWhileSetting(cyclePagesMenu.DropDown);
@@ -238,7 +238,7 @@ sealed class TrayAppContext : ApplicationContext
         UpdateCycleMenu();
 
         var contentMenu = new ToolStripMenuItem("内容设置");
-        contentMenu.DropDownItems.Add(MakeItem("设置自选股…", (_, _) =>
+        contentMenu.DropDownItems.Add(MakeItem("设置自选股", (_, _) =>
         {
             var input = InputDialog.Show("自选股",
                 "逗号分隔：sh/sz/bj=A股、hk=港股、us=美股；屏幕最多显示 4 只。\n例如 sh600519,hk00700,usAAPL",
@@ -247,8 +247,8 @@ sealed class TrayAppContext : ApplicationContext
             StockMonitor.Symbols = input.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             _stocks.Refresh();
         }));
-        var weatherMenu = new ToolStripMenuItem("天气设置");
-        weatherMenu.DropDownItems.Add(MakeItem("数据源与定位…", (_, _) =>
+        var weatherMenu = new ToolStripMenuItem("设置天气");
+        weatherMenu.DropDownItems.Add(MakeItem("数据源与定位", (_, _) =>
             _menu.BeginInvoke(OpenWeatherSettings)));
         var weatherAnimationMenu = new ToolStripMenuItem("右下角动画");
         foreach (var (title, animation) in new[]
