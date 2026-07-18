@@ -1739,13 +1739,15 @@ void drawScreenSaver(bool force) {
   snprintf(dateBuf, sizeof(dateBuf), "%02d-%02d", month, day);
   tft.setTextDatum(TL_DATUM);
   const int dateFont = 4;
+  const int dateTextHeight = tft.fontHeight(dateFont);
   const int dateW = tft.textWidth(dateBuf, dateFont) + 1;
-  const int weekdayGlyphSize = 26;
+  const int weekdayGlyphSize = dateTextHeight;
   const int weekdayW = weekdayGlyphSize * 2 + 2;
   const int dateLineW = dateW + 10 + weekdayW;
   const int timeW = 204;
+  const int calendarTop = 86;
   int groupW = max(timeW, dateLineW);
-  int groupH = 112;
+  int groupH = calendarTop + dateTextHeight;
   int rangeX = max(1, SCREEN_W - groupW - 12);
   int rangeY = max(1, SCREEN_H - groupH - 24);
   uint32_t motionTick = utc / 5;
@@ -1773,10 +1775,10 @@ void drawScreenSaver(bool force) {
   int timeVisibleCenter = timeX + (firstDigitVisibleLeft + timeW) / 2;
   int dateX = timeVisibleCenter - dateLineW / 2;
   tft.setTextDatum(TL_DATUM);
-  drawBoldString(dateBuf, dateX, y + 80, dateFont, dateColor);
+  drawBoldString(dateBuf, dateX, y + calendarTop, dateFont, dateColor);
   int weekdayX = dateX + dateW + 10;
-  drawWeekdayGlyph(0, weekdayX, y + 80, dateColor, weekdayGlyphSize);
-  drawWeekdayGlyph(weekday + 1, weekdayX + weekdayGlyphSize + 2, y + 80,
+  drawWeekdayGlyph(0, weekdayX, y + calendarTop, dateColor, weekdayGlyphSize);
+  drawWeekdayGlyph(weekday + 1, weekdayX + weekdayGlyphSize + 2, y + calendarTop,
                    accentColor, weekdayGlyphSize);
   screenSaverOldX = x;
   screenSaverOldY = y;

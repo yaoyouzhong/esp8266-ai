@@ -228,6 +228,7 @@ sealed class MirrorControl : Control
         var weekdayW = (int)Math.Ceiling(g.MeasureString(weekday, dateFont, int.MaxValue, textFormat).Width);
         var dateLineW = dateW + 8 + weekdayW;
         const int timeW = 204;
+        const int calendarTop = 86;
         var groupW = Math.Max(timeW, dateLineW);
         const int groupH = 112;
         var rangeX = Math.Max(1, 240 - groupW - 12);
@@ -249,8 +250,8 @@ sealed class MirrorControl : Control
         var firstDigitVisibleLeft = now.Hour / 10 == 1 ? 33 : 0;
         var timeVisibleCenter = timeX + (firstDigitVisibleLeft + timeW) / 2f;
         var dateX = timeVisibleCenter - dateLineW / 2f;
-        g.DrawString(date, dateFont, dateBrush, dateX, y + 81, textFormat);
-        g.DrawString(weekday, dateFont, accent, dateX + dateW + 8, y + 81, textFormat);
+        g.DrawString(date, dateFont, dateBrush, dateX, y + calendarTop, textFormat);
+        g.DrawString(weekday, dateFont, accent, dateX + dateW + 8, y + calendarTop, textFormat);
     }
 
     static void DrawLcdDigit(Graphics g, int digit, float x, float y, Brush brush)
