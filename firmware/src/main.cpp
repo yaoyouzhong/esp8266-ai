@@ -718,6 +718,19 @@ uint16_t dualPlanColor(const String &plan) {
   return TFT_LIGHTGREY;
 }
 
+void drawDualPlanBadge(const String &plan, int top) {
+  if (plan.length() == 0) return;
+  uint16_t color = dualPlanColor(plan);
+  tft.setTextFont(2);
+  int width = constrain(tft.textWidth(plan) + 10, 36, 82);
+  int left = 220 - width;
+  tft.fillRoundRect(left, top, width, 17, 4, TFT_BLACK);
+  tft.drawRoundRect(left, top, width, 17, 4, color);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.drawString(plan, left + width / 2, top + 8, 2);
+}
+
 void drawDualRow(const char *label, float pct, int resetMin, int y) {
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(0x7BEF, TFT_BLACK);
@@ -756,9 +769,7 @@ void drawDualSection(bool claude, bool force) {
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(claude ? TFT_ORANGE : TFT_CYAN, TFT_BLACK);
   drawBoldString(claude ? "CLAUDE" : "CODEX", 31, top, 2, claude ? TFT_ORANGE : TFT_CYAN);
-  tft.setTextDatum(TR_DATUM);
-  tft.setTextColor(dualPlanColor(plan), TFT_BLACK);
-  tft.drawString(plan, 220, top + 2, 2);
+  drawDualPlanBadge(plan, top);
 
   if (single) {
     drawDualRow("WK", weekPct, weekReset, top + 34);

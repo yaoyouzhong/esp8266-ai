@@ -469,8 +469,12 @@ sealed class UsageFetcher
             "enterprise" => "ENTERPRISE",
             "edu" => "EDU",
             "max" => "MAX",
-            "max_5x" or "max-5x" => "MAX 5X",
-            "max_20x" or "max-20x" => "MAX 20X",
+            "max_5x" or "max-5x" or "max5x" => "MAX 5X",
+            "max_20x" or "max-20x" or "max20x" => "MAX 20X",
+            "claude_pro" or "claude-pro" => "PRO",
+            "claude_max" or "claude-max" => "MAX",
+            "claude_max_5x" or "claude-max-5x" => "MAX 5X",
+            "claude_max_20x" or "claude-max-20x" => "MAX 20X",
             _ => null,
         };
     }

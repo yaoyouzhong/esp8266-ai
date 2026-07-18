@@ -27,7 +27,7 @@ A retro mini-TV with a 240×240 screen that shows **what Claude Code / Codex CLI
 
 | | |
 |---|---|
-| <img src="docs/images/feature1.jpg" width="360" alt="AI status"> | **AI status & quota**<br>Pet is walking = the AI is working. Claude/Codex show provider-reported quota windows. The domestic-model submenu selects exactly one vendor. Alibaba Bailian shows Qwen Token Plan usage and a gold badge for the subscription edition; Moonshot shows the Kimi membership tier and Coding Plan Weekly/5h windows. Like Codex, authenticated values refresh immediately at startup and every 2 minutes while the last successful value remains cached; unknown quota stays `--` instead of being estimated. |
+| <img src="docs/images/feature1.jpg" width="360" alt="AI status"> | **AI status & quota**<br>Pet is walking = the AI is working. Claude/Codex show provider-reported quota windows and subscription-tier badges. The domestic-model submenu selects exactly one vendor. Alibaba Bailian shows Qwen Token Plan usage and a gold badge for the subscription edition; Moonshot shows the Kimi membership tier and Coding Plan Weekly/5h windows. Like Codex, authenticated values refresh immediately at startup and every 2 minutes while the last successful value remains cached; unknown quota stays `--` instead of being estimated. |
 | <img src="docs/images/feature2.jpg" width="360" alt="System monitor"> | **Live system monitor**<br>Task-manager-style upload/download curves, a 56-second rolling window, an auto-scaling axis, plus Windows CPU and memory usage. |
 | <img src="docs/images/music.jpg" width="360" alt="Now playing"> | **Now playing**<br>Album art, title, artist and progress bar in real time; switches in automatically when music starts, back when it stops. |
 | | **Weather clock & stocks**<br>A Chinese weather clock with seconds, air quality, temperature, humidity and selectable pixel animation. Windows can use QWeather live conditions with a manually configured district or Windows geolocation, then fall back to Open-Meteo. The stock page supports up to four A-share, Hong Kong or US symbols using red-for-up/green-for-down. Both keep the last successful data during network failures. |
@@ -63,7 +63,7 @@ The bridge lives in your menu bar / tray. Windows uses direct CH340 serial trans
   <img src="docs/images/working.jpg" width="640" alt="In action">
 </p>
 
-Daily use is all on the tray icon: **left-click** opens a live mirror (with a brightness slider); **right-click** opens grouped menus for quota, device connection, display modes, page cycling, content, pets and bridge service. The cycle can include selected pages at 10/15/30/60-second intervals, and a manual page switch stops cycling.
+Daily use is all on the tray icon: **left-click** opens a live mirror (with a brightness slider); **right-click** opens grouped menus for quota, device connection, display modes, page cycling, content, pets and bridge service. The cycle supports selected pages, Move Up/Move Down ordering and 10/15/30/60-second intervals; a manual page switch stops cycling.
 The **Claude + Codex Quota** display mode puts both providers' limits and reset countdowns on one page.
 **Display mode → Domestic models** lists the major Chinese vendors and selects exactly one. Alibaba Bailian and Moonshot Kimi are currently wired for verified quota capture; other entries are marked pending.
 Screen saver controls are under **Display mode → Screen saver**, including timeout selection and immediate preview.

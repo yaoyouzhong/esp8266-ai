@@ -164,8 +164,14 @@ sealed class DomesticQuotaService
         try { snapshot = JsonSerializer.Deserialize<DomesticQuotaSnapshot>(File.ReadAllText(CachePath),
             new JsonSerializerOptions { IncludeFields = true }) ?? new(); }
         catch { snapshot = new(); }
+        if (snapshot.KimiMembership.StartsWith("LEVEL_", StringComparison.OrdinalIgnoreCase))
+            snapshot.KimiMembership = "";
         if (string.IsNullOrWhiteSpace(snapshot.KimiMembership))
-            snapshot.KimiMembership = Settings.Get("kimi_membership");
+        {
+            var savedMembership = Settings.Get("kimi_membership");
+            if (!savedMembership.StartsWith("LEVEL_", StringComparison.OrdinalIgnoreCase))
+                snapshot.KimiMembership = savedMembership;
+        }
         return snapshot;
     }
 
@@ -408,6 +414,8 @@ sealed class DomesticQuotaAuthForm : Form
             {
                 if (e.IsSuccess && _activeProvider?.Id is "qwen" or "kimi")
                     await PersistLoginCookies(_activeProvider.Url);
+                if (e.IsSuccess && _activeProvider?.Id == "kimi")
+                    _ = CaptureKimiMembershipFromPage(_navigationGeneration);
             };
         }
         _status.Text = provider.CaptureSupported
@@ -415,6 +423,43 @@ sealed class DomesticQuotaAuthForm : Form
             : $"{provider.Name}已提供统一登录入口；当前版本暂不读取其额度数字。";
         _web.CoreWebView2.Navigate(provider.Url);
         if (provider.CaptureSupported) _ = ShowPendingStatus(provider, generation);
+    }
+
+    async Task CaptureKimiMembershipFromPage(int generation)
+    {
+        const string script = """
+            (() => {
+              const cards = Array.from(document.querySelectorAll('.stats-card'));
+              const card = cards.find(item => {
+                const title = item.querySelector('.stats-card-title');
+                const text = title ? title.textContent.trim() : '';
+                return text === '我的权益' || text === 'My Benefits';
+              });
+              const value = card ? card.querySelector('.stats-card-value') : null;
+              return value ? value.textContent.trim() : '';
+            })()
+            """;
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            if (IsDisposed || generation != _navigationGeneration || _activeProvider?.Id != "kimi"
+                || _web.CoreWebView2 == null) return;
+            try
+            {
+                var result = await _web.CoreWebView2.ExecuteScriptAsync(script);
+                var membership = JsonSerializer.Deserialize<string>(result)?.Trim() ?? "";
+                if (membership.Length is > 0 and <= 32
+                    && !membership.StartsWith("LEVEL_", StringComparison.OrdinalIgnoreCase))
+                {
+                    _service.SetKimiMembership(membership);
+                    return;
+                }
+            }
+            catch
+            {
+                // The Vue page may still be replacing its initial DOM; retry below.
+            }
+            await Task.Delay(500);
+        }
     }
 
     async Task ShowPendingStatus(DomesticProviderDefinition provider, int generation)
@@ -583,12 +628,7 @@ sealed class DomesticQuotaAuthForm : Form
 
     static string FindKimiMembership(JsonElement element)
     {
-        if (element.ValueKind == JsonValueKind.String)
-        {
-            var value = element.GetString()?.Trim() ?? "";
-            if (value.Equals("Moderato", StringComparison.OrdinalIgnoreCase)) return "Moderato";
-            return "";
-        }
+        if (element.ValueKind == JsonValueKind.String) return "";
         if (element.ValueKind == JsonValueKind.Object)
         {
             foreach (var property in element.EnumerateObject())
@@ -600,7 +640,11 @@ sealed class DomesticQuotaAuthForm : Form
                         || property.Name.Contains("tier", StringComparison.OrdinalIgnoreCase)))
                 {
                     var value = property.Value.GetString()?.Trim() ?? "";
-                    if (value.Length is > 0 and <= 32) return value;
+                    if (value.Length is > 0 and <= 32)
+                    {
+                        if (value.StartsWith("LEVEL_", StringComparison.OrdinalIgnoreCase)) continue;
+                        return value;
+                    }
                 }
                 var nested = FindKimiMembership(property.Value);
                 if (nested.Length > 0) return nested;

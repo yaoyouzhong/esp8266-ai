@@ -17,8 +17,8 @@ sealed class TrayAppContext : ApplicationContext
     const string ScreenSaverPreviousModeKey = "screensaver_previous_mode";
     static readonly (string Title, string Mode)[] DisplayModes =
     {
-        ("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
-        ("固定 Codex", "codex"), ("Claude + Codex 额度", "dual"), ("国产模型", "domestic"),
+        ("自动（谁在干活显示谁）", "auto"), ("Claude", "claude"),
+        ("Codex", "codex"), ("Claude + Codex 额度", "dual"), ("国产模型", "domestic"),
         ("系统监控", "net"), ("音乐播放", "music"), ("股票行情", "stock"),
         ("天气时钟", "weather"),
     };
@@ -218,6 +218,8 @@ sealed class TrayAppContext : ApplicationContext
             cyclePagesMenu.DropDownItems.Add(item);
         }
         cycleMenu.DropDownItems.Add(cyclePagesMenu);
+        cycleMenu.DropDownItems.Add(MakeItem("调整展示顺序…", (_, _) =>
+            _menu.BeginInvoke(EditCycleOrder)));
         var intervalMenu = new ToolStripMenuItem("切换间隔");
         foreach (var seconds in new[] { 10, 15, 30, 60 })
         {
@@ -497,15 +499,40 @@ sealed class TrayAppContext : ApplicationContext
 
     List<string> CyclePages()
     {
-        if (_cyclePageItems.Count == CycleModes.Length)
-            return CycleModes.Where(x => _cyclePageItems[x.Mode].Checked).Select(x => x.Mode).ToList();
-        return Settings.Get(CyclePagesKey).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+        var valid = CycleModes.Select(x => x.Mode).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var saved = Settings.Get(CyclePagesKey)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(valid.Contains)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (_cyclePageItems.Count != CycleModes.Length) return saved;
+
+        var ordered = saved.Where(mode => _cyclePageItems[mode].Checked).ToList();
+        ordered.AddRange(CycleModes.Select(x => x.Mode)
+            .Where(mode => _cyclePageItems[mode].Checked && !ordered.Contains(mode)));
+        return ordered;
     }
 
     void SaveCyclePages()
     {
-        Settings.Set(CyclePagesKey, string.Join(",", CyclePages()));
-        if (_cycleEnabled && CyclePages().Count == 0) _ = SetCycleEnabled(false, restoreAuto: true);
+        var pages = CyclePages();
+        Settings.Set(CyclePagesKey, string.Join(",", pages));
+        _cycleIndex = -1;
+        if (_cycleEnabled && pages.Count == 0) _ = SetCycleEnabled(false, restoreAuto: true);
+    }
+
+    void EditCycleOrder()
+    {
+        var pages = CyclePages();
+        if (pages.Count < 2)
+        {
+            Toast("循环展示", "请先在“循环页面”中至少选择两个页面。");
+            return;
+        }
+        var ordered = CycleOrderDialog.Show(pages, CycleModes);
+        if (ordered == null) return;
+        Settings.Set(CyclePagesKey, string.Join(",", ordered));
+        _cycleIndex = -1;
     }
 
     void EnsureDefaultCyclePages()
@@ -591,8 +618,9 @@ sealed class TrayAppContext : ApplicationContext
 
     static string UsageLine(string name, ProviderUsage u, string weeklyLabel)
     {
+        var heading = string.IsNullOrWhiteSpace(u.Plan) ? name : $"{name} [{u.Plan}]";
         if (u.Error != null && u.PrimaryPct == null && u.WeeklyPct == null)
-            return $"{name}：{u.Error}";
+            return $"{heading}：{u.Error}";
         var parts = new List<string>();
         if (u.PrimaryPct.HasValue)
         {
@@ -606,7 +634,7 @@ sealed class TrayAppContext : ApplicationContext
             if (u.WeeklyResetMin.HasValue) s += $"（{FmtMin(u.WeeklyResetMin.Value)}）";
             parts.Add(s);
         }
-        return parts.Count == 0 ? $"{name}：额度未知" : $"{name}　" + string.Join("　", parts);
+        return parts.Count == 0 ? $"{heading}：额度未知" : $"{heading}　" + string.Join("　", parts);
     }
 
     static string FmtMin(int min)
@@ -808,6 +836,66 @@ sealed class TrayAppContext : ApplicationContext
     static void Toast(string title, string text)
     {
         MessageBox.Show(text, title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+}
+
+static class CycleOrderDialog
+{
+    public static List<string> Show(
+        IReadOnlyList<string> current,
+        IReadOnlyList<(string Title, string Mode)> catalog)
+    {
+        var titles = catalog.ToDictionary(x => x.Mode, x => x.Title);
+        var order = current.ToList();
+        using var form = new Form
+        {
+            Text = "调整循环展示顺序",
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterScreen,
+            MinimizeBox = false,
+            MaximizeBox = false,
+            ShowInTaskbar = false,
+            Font = new Font("Microsoft YaHei UI", 9f),
+            ClientSize = new Size(390, 330),
+            TopMost = true,
+        };
+        var tip = new Label
+        {
+            Text = "设备将按从上到下的顺序循环展示。",
+            AutoSize = false,
+        };
+        tip.SetBounds(16, 14, 358, 24);
+        var list = new ListBox();
+        list.SetBounds(16, 43, 270, 225);
+        foreach (var mode in order) list.Items.Add(titles[mode]);
+        if (list.Items.Count > 0) list.SelectedIndex = 0;
+
+        var up = new Button { Text = "上移" };
+        var down = new Button { Text = "下移" };
+        up.SetBounds(300, 72, 74, 30);
+        down.SetBounds(300, 112, 74, 30);
+        void Move(int delta)
+        {
+            var from = list.SelectedIndex;
+            var to = from + delta;
+            if (from < 0 || to < 0 || to >= order.Count) return;
+            (order[from], order[to]) = (order[to], order[from]);
+            var item = list.Items[from];
+            list.Items.RemoveAt(from);
+            list.Items.Insert(to, item);
+            list.SelectedIndex = to;
+        }
+        up.Click += (_, _) => Move(-1);
+        down.Click += (_, _) => Move(1);
+
+        var ok = new Button { Text = "保存", DialogResult = DialogResult.OK };
+        var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel };
+        ok.SetBounds(204, 286, 80, 30);
+        cancel.SetBounds(294, 286, 80, 30);
+        form.Controls.AddRange(new Control[] { tip, list, up, down, ok, cancel });
+        form.AcceptButton = ok;
+        form.CancelButton = cancel;
+        return form.ShowDialog() == DialogResult.OK ? order : null;
     }
 }
 

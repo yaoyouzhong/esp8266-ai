@@ -432,7 +432,23 @@ sealed class MirrorControl : Control
             g.FillEllipse(statusBrush, 18, top + 4, 7, 7);
             g.DrawString(name, appFont, name == "CLAUDE" ? Brushes.Orange : Brushes.Cyan, 31, top);
             if (!string.IsNullOrWhiteSpace(plan))
-                g.DrawString(plan, smallFont, muted, new RectangleF(145, top + 2, 76, 14), right);
+            {
+                var color = PlanColor(plan);
+                var badgeWidth = Math.Clamp((int)Math.Ceiling(g.MeasureString(plan, smallFont).Width) + 10, 36, 78);
+                var badge = new RectangleF(220 - badgeWidth, top, badgeWidth, 16);
+                using var badgePath = RoundedRect(badge, 4);
+                using var badgeFill = new SolidBrush(Color.FromArgb(35, color));
+                using var badgeBorder = new Pen(color, 1);
+                using var badgeText = new SolidBrush(color);
+                using var badgeFormat = new StringFormat
+                {
+                    Alignment = StringAlignment.Center,
+                    LineAlignment = StringAlignment.Center,
+                };
+                g.FillPath(badgeFill, badgePath);
+                g.DrawPath(badgeBorder, badgePath);
+                g.DrawString(plan, smallFont, badgeText, badge, badgeFormat);
+            }
 
             void Row(string label, double? pct, int? reset, float y)
             {
