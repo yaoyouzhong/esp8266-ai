@@ -50,6 +50,16 @@ static class Program
             Environment.Exit(TestUsb().GetAwaiter().GetResult());
             return;
         }
+        if (args.Length >= 1 && args[0] == "--test-usb-alerts")
+        {
+            Environment.Exit(TestUsbAlerts().GetAwaiter().GetResult());
+            return;
+        }
+        if (args.Length >= 1 && args[0] == "--test-quota-window")
+        {
+            Environment.Exit(TestQuotaWindow());
+            return;
+        }
 
         using var singleInstance = new Mutex(true, @"Local\AIClockBridge.SingleInstance", out var isFirstInstance);
         if (!isFirstInstance) return;
@@ -82,6 +92,7 @@ static class Program
         var weather = new WeatherMonitor();
         weather.Start();
         using var serialBridge = new SerialBridge(service, netMonitor, nowPlaying, stocks, weather);
+        service.UrgentUpdate = serialBridge.PushStatusNow;
         DeviceClient.Usb = serialBridge;
 
         var server = new MiniHttpServer(Port,
@@ -221,10 +232,38 @@ static class Program
         }
     }
 
+    static int TestQuotaWindow()
+    {
+        ApplicationConfiguration.Initialize();
+        using var form = new DomesticQuotaAuthForm(new DomesticQuotaService(), hideOnUserClose: false);
+        using var timer = new System.Windows.Forms.Timer { Interval = 2000 };
+        var passed = false;
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            form.ShowAuthorization("qwen");
+            passed = form.Visible && form.Opacity == 1 && form.ShowInTaskbar
+                && form.WindowState == FormWindowState.Maximized
+                && Screen.AllScreens.Any(screen => screen.Bounds.IntersectsWith(form.Bounds));
+            Console.Error.WriteLine(passed
+                ? "[test-quota-window] first authorization click restored the window on-screen"
+                : $"[test-quota-window] failed: visible={form.Visible}, opacity={form.Opacity}, state={form.WindowState}, bounds={form.Bounds}");
+            form.Close();
+            Application.ExitThread();
+        };
+        form.RefreshInBackground("qwen");
+        timer.Start();
+        Application.Run();
+        return passed ? 0 : 1;
+    }
+
     static async Task<int> TestUsb()
     {
         ApplicationConfiguration.Initialize();
         var service = new StatusService();
+        var domesticUsage = new DomesticQuotaService();
+        service.DomesticUsage = domesticUsage;
+        service.DomesticProviderOverride = "kimi";
         var net = new NetSpeedMonitor();
         var music = new NowPlayingMonitor();
         var stocks = new StockMonitor();
@@ -232,6 +271,7 @@ static class Program
         var weather = new WeatherMonitor();
         weather.Start();
         using var usb = new SerialBridge(service, net, music, stocks, weather, telemetryEnabled: true);
+        service.UrgentUpdate = usb.PushStatusNow;
         DeviceClient.Usb = usb;
         for (var i = 0; i < 200 && !usb.Connected; i++) await Task.Delay(100);
         if (!usb.Connected)
@@ -263,6 +303,28 @@ static class Program
                 throw new Exception($"dual quota page did not activate (effective={usb.DeviceInfo?.Effective ?? "--"}, showing={usb.DeviceInfo?.Showing ?? "--"})");
             Console.Error.WriteLine("[test-usb] dual quota page verified");
 
+            usb.SetDisplayMode("domestic");
+            await Task.Delay(500);
+            for (var i = 0; i < 20 && usb.DeviceInfo?.Effective != "domestic"; i++)
+            {
+                usb.RequestInfo();
+                await Task.Delay(100);
+            }
+            if (usb.DeviceInfo?.Effective != "domestic")
+                throw new Exception("Kimi domestic quota page did not activate");
+            var kimiMembership = service.Snapshot().Domestic.Active.Model;
+            if (kimiMembership.Length == 0)
+                throw new Exception("Kimi membership was not loaded for the domestic quota page");
+            if (!service.Snapshot().Domestic.Active.MembershipBadge)
+                throw new Exception("Kimi membership badge flag was not set");
+            Console.Error.WriteLine($"[test-usb] Kimi domestic quota page verified ({kimiMembership})");
+            service.DomesticProviderOverride = "qwen";
+            await Task.Delay(1200);
+            var qwenMembership = service.Snapshot().Domestic.Active;
+            if (qwenMembership.Model != "TEAM" || !qwenMembership.MembershipBadge)
+                throw new Exception($"Qwen membership badge was not resolved (model={qwenMembership.Model})");
+            Console.Error.WriteLine("[test-usb] Qwen membership badge verified (TEAM)");
+
             usb.SetDisplayMode("screensaver_preview");
             await Task.Delay(500);
             usb.RequestInfo();
@@ -285,13 +347,15 @@ static class Program
             }
             if (usb.DeviceInfo?.Effective != "stock") throw new Exception("stock page did not activate after system monitor");
             service.RecordEvent("codex", "PermissionRequest");
+            var approvalSnapshot = service.Snapshot();
+            Console.Error.WriteLine($"[test-usb] approval bridge state needs_input={approvalSnapshot.Codex.NeedsInput}, status={approvalSnapshot.Codex.Status}");
             for (var i = 0; i < 40 && (usb.DeviceInfo?.Effective != "auto" || usb.DeviceInfo?.Showing != "codex"); i++)
             {
                 usb.RequestInfo();
                 await Task.Delay(100);
             }
             if (usb.DeviceInfo?.Effective != "auto" || usb.DeviceInfo?.Showing != "codex")
-                throw new Exception("Codex approval alert did not override pinned page");
+                throw new Exception($"Codex approval alert did not override pinned page (bridge_needs_input={service.Snapshot().Codex.NeedsInput}, effective={usb.DeviceInfo?.Effective ?? "--"}, showing={usb.DeviceInfo?.Showing ?? "--"})");
             service.RecordEvent("codex", "UserPromptSubmit");
             for (var i = 0; i < 40 && usb.DeviceInfo?.Effective != "stock"; i++)
             {
@@ -300,30 +364,30 @@ static class Program
             }
             if (usb.DeviceInfo?.Effective != "stock") throw new Exception("pinned page did not resume after approval");
             service.RecordEvent("codex", "Stop");
+            var completionSnapshot = service.Snapshot();
+            Console.Error.WriteLine($"[test-usb] completion bridge state active={completionSnapshot.Codex.CompletionActive}, seq={completionSnapshot.Codex.CompletionSeq}, at={completionSnapshot.Codex.CompletionAt}");
             for (var i = 0; i < 40 && (usb.DeviceInfo?.Effective != "auto" || usb.DeviceInfo?.Showing != "codex"); i++)
             {
                 usb.RequestInfo();
                 await Task.Delay(100);
             }
             if (usb.DeviceInfo?.Effective != "auto" || usb.DeviceInfo?.Showing != "codex")
-                throw new Exception("Codex completion alert did not activate");
+                throw new Exception($"Codex completion alert did not activate (bridge_active={service.Snapshot().Codex.CompletionActive}, seq={service.Snapshot().Codex.CompletionSeq}, effective={usb.DeviceInfo?.Effective ?? "--"}, showing={usb.DeviceInfo?.Showing ?? "--"})");
             var firstCompletionSeq = service.Snapshot().Codex.CompletionSeq;
             await Task.Delay(100);
             service.RecordEvent("codex", "Stop");
             if (service.Snapshot().Codex.CompletionSeq <= firstCompletionSeq)
                 throw new Exception("second Codex completion was not retained");
-            await Task.Delay(2800);
+            await Task.Delay(7800);
             usb.RequestInfo();
-            if (usb.DeviceInfo?.Effective != "auto" || usb.DeviceInfo?.Showing != "codex")
-                throw new Exception("Codex completion alert did not persist before acknowledgement");
-            service.AcknowledgeCodexCompletion();
             for (var i = 0; i < 30 && usb.DeviceInfo?.Effective != "stock"; i++)
             {
                 usb.RequestInfo();
                 await Task.Delay(100);
             }
-            if (usb.DeviceInfo?.Effective != "stock") throw new Exception("pinned page did not resume after completion alert");
-            Console.Error.WriteLine("[test-usb] persistent multi-completion alert verified");
+            if (usb.DeviceInfo?.Effective != "stock") throw new Exception("five-pulse completion alert did not restore pinned page");
+            service.AcknowledgeCodexCompletion();
+            Console.Error.WriteLine("[test-usb] five-pulse multi-completion alert verified");
 
             await Task.Delay(3500);
             Console.Error.WriteLine($"[test-usb] stock page {stocks.Snapshot.Length} row(s), names {stocks.NameBitmap.Length} bytes");
@@ -384,6 +448,85 @@ static class Program
             Console.Error.WriteLine($"[test-usb] failed: {e.Message}");
             usb.SetDisplayMode("auto");
             usb.ResetSprite("claude");
+            return 1;
+        }
+    }
+
+    static async Task<int> TestUsbAlerts()
+    {
+        ApplicationConfiguration.Initialize();
+        var service = new StatusService();
+        using var usb = new SerialBridge(service, new NetSpeedMonitor(), new NowPlayingMonitor());
+        service.UrgentUpdate = usb.PushStatusNow;
+        for (var i = 0; i < 200 && !usb.Connected; i++) await Task.Delay(100);
+        if (!usb.Connected)
+        {
+            Console.Error.WriteLine("[test-usb-alerts] device handshake timeout");
+            return 1;
+        }
+        try
+        {
+            for (var i = 0; i < 30 && usb.DeviceInfo == null; i++)
+            {
+                usb.RequestInfo();
+                await Task.Delay(100);
+            }
+            if (usb.DeviceInfo == null) throw new Exception("device info handshake did not complete");
+            for (var i = 0; i < 40 && usb.DeviceInfo?.Effective != "stock"; i++)
+            {
+                if (i % 10 == 0) usb.SetDisplayMode("stock");
+                usb.RequestInfo();
+                await Task.Delay(100);
+            }
+            if (usb.DeviceInfo?.Effective != "stock")
+                throw new Exception("stock baseline did not activate");
+
+            service.RecordEvent("codex", "PermissionRequest");
+            for (var i = 0; i < 40 && (usb.DeviceInfo?.Effective != "auto" || usb.DeviceInfo?.Showing != "codex"); i++)
+            {
+                usb.RequestInfo();
+                await Task.Delay(100);
+            }
+            if (usb.DeviceInfo?.Effective != "auto" || usb.DeviceInfo?.Showing != "codex")
+                throw new Exception("approval alert did not activate");
+
+            service.RecordEvent("codex", "UserPromptSubmit");
+            for (var i = 0; i < 40 && usb.DeviceInfo?.Effective != "stock"; i++)
+            {
+                usb.RequestInfo();
+                await Task.Delay(100);
+            }
+            if (usb.DeviceInfo?.Effective != "stock")
+                throw new Exception("approval clear did not restore stock");
+
+            service.RecordEvent("codex", "Stop");
+            for (var i = 0; i < 40 && (usb.DeviceInfo?.Effective != "auto" || usb.DeviceInfo?.Showing != "codex"); i++)
+            {
+                usb.RequestInfo();
+                await Task.Delay(100);
+            }
+            if (usb.DeviceInfo?.Effective != "auto" || usb.DeviceInfo?.Showing != "codex")
+                throw new Exception("completion alert did not activate");
+            var firstSeq = service.Snapshot().Codex.CompletionSeq;
+            service.RecordEvent("codex", "Stop");
+            if (service.Snapshot().Codex.CompletionSeq <= firstSeq)
+                throw new Exception("second completion event was not retained");
+
+            await Task.Delay(7800);
+            for (var i = 0; i < 30 && usb.DeviceInfo?.Effective != "stock"; i++)
+            {
+                usb.RequestInfo();
+                await Task.Delay(100);
+            }
+            if (usb.DeviceInfo?.Effective != "stock")
+                throw new Exception("five pulses did not restore stock");
+            service.AcknowledgeCodexCompletion();
+            Console.Error.WriteLine("[test-usb-alerts] approval + multi-completion + five-pulse restore verified");
+            return 0;
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine($"[test-usb-alerts] failed: {error.Message}");
             return 1;
         }
     }

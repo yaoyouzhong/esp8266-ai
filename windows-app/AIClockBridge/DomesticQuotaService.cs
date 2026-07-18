@@ -38,6 +38,8 @@ sealed class DomesticQuotaSnapshot
     public double? XiaomiPlanPct;
     public double? KimiWeeklyPct;
     public double? KimiFiveHourPct;
+    public string QwenMembership = "";
+    public string KimiMembership = "";
     public DateTime? QwenFetchedAt;
     public DateTime? XiaomiFetchedAt;
     public DateTime? KimiFetchedAt;
@@ -48,10 +50,14 @@ sealed class DomesticQuotaSnapshot
 /// and WebView2 owns its isolated persistent browser profile.
 sealed class DomesticQuotaService
 {
+    internal const string QwenSubscriptionName = "Token Plan 团队版";
+    static readonly TimeSpan MinRefreshInterval = TimeSpan.FromSeconds(60);
+    static readonly TimeSpan RateLimitBackoff = TimeSpan.FromSeconds(300);
     static readonly string CachePath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "AIClockBridge", "domestic-quota-cache.json");
     readonly object _lock = new();
+    readonly Dictionary<string, DateTime> _nextAllowedRefresh = new();
     DomesticQuotaSnapshot _snapshot = Load();
     DomesticQuotaAuthForm _form;
 
@@ -65,6 +71,8 @@ sealed class DomesticQuotaService
                 XiaomiPlanPct = _snapshot.XiaomiPlanPct,
                 KimiWeeklyPct = _snapshot.KimiWeeklyPct,
                 KimiFiveHourPct = _snapshot.KimiFiveHourPct,
+                QwenMembership = _snapshot.QwenMembership,
+                KimiMembership = _snapshot.KimiMembership,
                 QwenFetchedAt = _snapshot.QwenFetchedAt,
                 XiaomiFetchedAt = _snapshot.XiaomiFetchedAt,
                 KimiFetchedAt = _snapshot.KimiFetchedAt,
@@ -76,18 +84,44 @@ sealed class DomesticQuotaService
     {
         if (_form == null || _form.IsDisposed)
             _form = new DomesticQuotaAuthForm(this, initialProviderId: providerId);
-        else
-            _form.NavigateToProvider(providerId);
-        _form.TopMost = true;
-        if (!_form.Visible) _form.Show();
-        _form.BringToFront();
-        _form.Activate();
-        _form.BeginInvoke(() => _form.TopMost = false);
+        _form.ShowAuthorization(providerId);
     }
 
-    internal void SetQwen(double pct)
+    public void Refresh(string providerId)
     {
-        lock (_lock) { _snapshot.QwenPlanPct = Clamp(pct); _snapshot.QwenFetchedAt = DateTime.UtcNow; Save(); }
+        var provider = DomesticProviderCatalog.All.FirstOrDefault(x => x.Id == providerId);
+        if (provider?.CaptureSupported != true) return;
+        lock (_lock)
+        {
+            if (_nextAllowedRefresh.TryGetValue(providerId, out var next)
+                && DateTime.UtcNow < next) return;
+            _nextAllowedRefresh[providerId] = DateTime.UtcNow + MinRefreshInterval;
+        }
+        if (_form == null || _form.IsDisposed)
+            _form = new DomesticQuotaAuthForm(this, initialProviderId: providerId);
+        _form.RefreshInBackground(providerId);
+    }
+
+    internal void BackOff(string providerId)
+    {
+        lock (_lock)
+        {
+            var next = DateTime.UtcNow + RateLimitBackoff;
+            if (!_nextAllowedRefresh.TryGetValue(providerId, out var current) || current < next)
+                _nextAllowedRefresh[providerId] = next;
+        }
+    }
+
+    internal void SetQwen(double pct, string membership = null)
+    {
+        lock (_lock)
+        {
+            _snapshot.QwenPlanPct = Clamp(pct);
+            if (!string.IsNullOrWhiteSpace(membership))
+                _snapshot.QwenMembership = membership.Trim();
+            _snapshot.QwenFetchedAt = DateTime.UtcNow;
+            Save();
+        }
     }
 
     internal void SetXiaomi(double pct)
@@ -95,13 +129,29 @@ sealed class DomesticQuotaService
         lock (_lock) { _snapshot.XiaomiPlanPct = Clamp(pct); _snapshot.XiaomiFetchedAt = DateTime.UtcNow; Save(); }
     }
 
-    internal void SetKimi(double weeklyPct, double? fiveHourPct)
+    internal void SetKimi(double weeklyPct, double? fiveHourPct, string membership = null)
     {
         lock (_lock)
         {
             _snapshot.KimiWeeklyPct = Clamp(weeklyPct);
             _snapshot.KimiFiveHourPct = fiveHourPct.HasValue ? Clamp(fiveHourPct.Value) : null;
+            if (!string.IsNullOrWhiteSpace(membership))
+            {
+                _snapshot.KimiMembership = membership.Trim();
+                Settings.Set("kimi_membership", _snapshot.KimiMembership);
+            }
             _snapshot.KimiFetchedAt = DateTime.UtcNow;
+            Save();
+        }
+    }
+
+    internal void SetKimiMembership(string membership)
+    {
+        if (string.IsNullOrWhiteSpace(membership)) return;
+        lock (_lock)
+        {
+            _snapshot.KimiMembership = membership.Trim();
+            Settings.Set("kimi_membership", _snapshot.KimiMembership);
             Save();
         }
     }
@@ -110,9 +160,13 @@ sealed class DomesticQuotaService
 
     static DomesticQuotaSnapshot Load()
     {
-        try { return JsonSerializer.Deserialize<DomesticQuotaSnapshot>(File.ReadAllText(CachePath),
+        DomesticQuotaSnapshot snapshot;
+        try { snapshot = JsonSerializer.Deserialize<DomesticQuotaSnapshot>(File.ReadAllText(CachePath),
             new JsonSerializerOptions { IncludeFields = true }) ?? new(); }
-        catch { return new(); }
+        catch { snapshot = new(); }
+        if (string.IsNullOrWhiteSpace(snapshot.KimiMembership))
+            snapshot.KimiMembership = Settings.Get("kimi_membership");
+        return snapshot;
     }
 
     void Save()
@@ -142,6 +196,8 @@ sealed class DomesticQuotaAuthForm : Form
     string _initialProviderId;
     int _navigationGeneration;
     bool _capturedForNavigation;
+    bool _everShown;
+    bool _backgroundRefresh;
     readonly Label _providerTitle = new()
     {
         AutoSize = true, Font = new Font("Microsoft YaHei UI", 14, FontStyle.Bold),
@@ -219,14 +275,46 @@ sealed class DomesticQuotaAuthForm : Form
         Controls.Add(content);
         Controls.Add(navigation);
 
-        Shown += async (_, _) => await SelectProvider(ProviderById(_initialProviderId));
+        Shown += async (_, _) =>
+        {
+            _everShown = true;
+            await SelectProvider(ProviderById(_initialProviderId));
+        };
     }
 
-    public void NavigateToProvider(string providerId)
+    public void ShowAuthorization(string providerId)
     {
         _initialProviderId = providerId;
-        if (IsHandleCreated)
-            BeginInvoke(async () => await SelectProvider(ProviderById(providerId)));
+        _backgroundRefresh = false;
+        ShowInTaskbar = true;
+        Opacity = 1;
+        var targetScreen = Screen.FromPoint(Cursor.Position);
+        StartPosition = FormStartPosition.Manual;
+        WindowState = FormWindowState.Normal;
+        Bounds = targetScreen.WorkingArea;
+        TopMost = true;
+        var wasEverShown = _everShown;
+        if (!Visible) Show();
+        WindowState = FormWindowState.Maximized;
+        if (wasEverShown) BeginInvoke(async () => await SelectProvider(ProviderById(providerId)));
+        BringToFront();
+        Activate();
+        BeginInvoke(() => TopMost = false);
+    }
+
+    public void RefreshInBackground(string providerId)
+    {
+        if (Visible && !_backgroundRefresh) return; // never interrupt an interactive login
+        _initialProviderId = providerId;
+        _backgroundRefresh = true;
+        ShowInTaskbar = false;
+        Opacity = 0;
+        StartPosition = FormStartPosition.Manual;
+        WindowState = FormWindowState.Normal;
+        Location = new Point(-32000, -32000);
+        var wasEverShown = _everShown;
+        if (!Visible) Show();
+        if (wasEverShown) BeginInvoke(async () => await SelectProvider(ProviderById(providerId)));
     }
 
     static DomesticProviderDefinition ProviderById(string providerId) =>
@@ -346,6 +434,7 @@ sealed class DomesticQuotaAuthForm : Form
             ? $"最近成功：{fetchedAt.Value.ToLocalTime():M月d日 HH:mm}"
             : "尚无成功记录";
         BeginInvoke(() => _status.Text = $"尚未捕获到{provider.Product}额度响应；{last}。可刷新页面重试。 ");
+        if (_backgroundRefresh) BeginInvoke(Hide);
     }
 
     void CdpResponseReceived(object sender, CoreWebView2DevToolsProtocolEventReceivedEventArgs e)
@@ -361,6 +450,9 @@ sealed class DomesticQuotaAuthForm : Form
                 ? mimeValue.GetString() ?? "" : "";
             var resourceType = root.TryGetProperty("type", out var typeValue)
                 ? typeValue.GetString() ?? "" : "";
+            var statusCode = response.TryGetProperty("status", out var statusValue)
+                && statusValue.ValueKind == JsonValueKind.Number
+                ? statusValue.GetInt32() : 0;
             var jsonRequest = (resourceType == "XHR" || resourceType == "Fetch")
                 && (mime.Contains("json", StringComparison.OrdinalIgnoreCase)
                     || uri.Contains(".json", StringComparison.OrdinalIgnoreCase));
@@ -371,8 +463,15 @@ sealed class DomesticQuotaAuthForm : Form
             var isXiaomi = _activeProvider?.Id == "xiaomi"
                 && uri.Contains("/api/v1/tokenPlan/usage", StringComparison.OrdinalIgnoreCase);
             var isKimi = _activeProvider?.Id == "kimi" && jsonRequest
-                && uri.Contains("kimi.gateway.billing.v1.BillingService/GetUsages",
-                    StringComparison.OrdinalIgnoreCase);
+                && uri.Contains("kimi", StringComparison.OrdinalIgnoreCase);
+            if (statusCode == 429 && (isAlibaba || isXiaomi || isKimi))
+            {
+                var providerId = isAlibaba ? "qwen" : isXiaomi ? "xiaomi" : "kimi";
+                _service.BackOff(providerId);
+                BeginInvoke(() => _status.Text = "供应商额度接口限流，5 分钟后自动重试；当前继续显示最近成功值。");
+                if (_backgroundRefresh) BeginInvoke(Hide);
+                return;
+            }
             if (requestId != null && (isAlibaba || isXiaomi || isKimi))
             {
                 var endpoint = Uri.TryCreate(uri, UriKind.Absolute, out var parsed)
@@ -411,20 +510,28 @@ sealed class DomesticQuotaAuthForm : Form
             using var doc = JsonDocument.Parse(body);
             double weeklyPct;
             double? fiveHourPct = null;
+            string membership = null;
             if (responseInfo.ProviderId == "kimi")
             {
                 var kimi = FindKimiUsage(doc.RootElement);
-                if (kimi == null) return;
+                membership = FindKimiMembership(doc.RootElement);
+                if (kimi == null)
+                {
+                    _service.SetKimiMembership(membership);
+                    return;
+                }
                 weeklyPct = kimi.Value.WeeklyPct;
                 fiveHourPct = kimi.Value.FiveHourPct;
-                _service.SetKimi(weeklyPct, fiveHourPct);
+                _service.SetKimi(weeklyPct, fiveHourPct, membership);
             }
             else
             {
+                if (responseInfo.ProviderId == "qwen")
+                    membership = DomesticQuotaService.QwenSubscriptionName;
                 var pct = FindUsage(doc.RootElement, responseInfo.ProviderId == "qwen");
                 if (!pct.HasValue) return;
                 weeklyPct = pct.Value;
-                if (responseInfo.ProviderId == "qwen") _service.SetQwen(pct.Value);
+                if (responseInfo.ProviderId == "qwen") _service.SetQwen(pct.Value, membership);
                 else _service.SetXiaomi(pct.Value);
             }
             var responseProvider = ProviderById(responseInfo.ProviderId);
@@ -437,7 +544,10 @@ sealed class DomesticQuotaAuthForm : Form
                         + (fiveHourPct.HasValue ? $"，5h {fiveHourPct.Value:0.##}%" : "")
                         + "（已缓存）" + (loginSaved ? "；登录状态已持久保存" : "")
                     : $"已取得{(responseInfo.ProviderId == "qwen" ? "阿里云" : "小米")}准确用量：{weeklyPct:F1}%（已缓存）"
+                    + (responseInfo.ProviderId == "qwen" && !string.IsNullOrWhiteSpace(membership)
+                        ? $"；订阅：{membership}" : "")
                     + (loginSaved ? "；登录状态已持久保存" : ""));
+            if (_backgroundRefresh) BeginInvoke(Hide);
         }
         catch (Exception ex)
         {
@@ -470,6 +580,42 @@ sealed class DomesticQuotaAuthForm : Form
     }
 
     readonly record struct KimiUsage(double WeeklyPct, double? FiveHourPct);
+
+    static string FindKimiMembership(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.String)
+        {
+            var value = element.GetString()?.Trim() ?? "";
+            if (value.Equals("Moderato", StringComparison.OrdinalIgnoreCase)) return "Moderato";
+            return "";
+        }
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                if (property.Value.ValueKind == JsonValueKind.String
+                    && (property.Name.Contains("membership", StringComparison.OrdinalIgnoreCase)
+                        || property.Name.Contains("member_level", StringComparison.OrdinalIgnoreCase)
+                        || property.Name.Contains("plan_name", StringComparison.OrdinalIgnoreCase)
+                        || property.Name.Contains("tier", StringComparison.OrdinalIgnoreCase)))
+                {
+                    var value = property.Value.GetString()?.Trim() ?? "";
+                    if (value.Length is > 0 and <= 32) return value;
+                }
+                var nested = FindKimiMembership(property.Value);
+                if (nested.Length > 0) return nested;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in element.EnumerateArray())
+            {
+                var nested = FindKimiMembership(child);
+                if (nested.Length > 0) return nested;
+            }
+        }
+        return "";
+    }
 
     static KimiUsage? FindKimiUsage(JsonElement element)
     {

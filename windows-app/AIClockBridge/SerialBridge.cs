@@ -40,11 +40,15 @@ sealed class SerialBridge : IDisposable
     bool _insideBinaryFrame;
     readonly SemaphoreSlim _transferLock = new(1, 1);
     readonly object _ackLock = new();
+    readonly object _alertAckLock = new();
     TaskCompletionSource<bool> _ackWaiter;
+    readonly Dictionary<int, TaskCompletionSource<bool>> _alertAckWaiters = new();
     ushort _ackTransfer;
     int _ackSeq;
     string _ackStage = "";
     int _nextTransferId;
+    int _nextAlertSeq;
+    readonly uint _alertSession = (uint)Random.Shared.NextInt64(1, uint.MaxValue);
     int _lastTextRev = -1;
     int _lastArtworkRev = -1;
     int _musicImageTransfer;
@@ -246,14 +250,26 @@ sealed class SerialBridge : IDisposable
             }
             else if (type == "info" && root.TryGetProperty("data", out var data))
             {
+                var firstInfo = _deviceInfo == null;
                 _deviceInfo = ParseInfo(data);
                 _lastHelloAt = DateTime.UtcNow;
+                if (firstInfo) PushStatusNow();
                 QueuePendingImages();
             }
             else if (type == "status_ack" && !_statusAckLogged)
             {
                 _statusAckLogged = true;
                 Console.Error.WriteLine($"[usb] status acknowledged by {_port.PortName}");
+            }
+            else if (type == "alert_ack")
+            {
+                var seq = Int(root, "alert_seq", -1);
+                var session = UInt(root, "alert_session");
+                lock (_alertAckLock)
+                {
+                    if (session == _alertSession && _alertAckWaiters.TryGetValue(seq, out var waiter))
+                        waiter.TrySetResult(true);
+                }
             }
             ProcessTransferMessage(type, root);
         }
@@ -535,6 +551,42 @@ sealed class SerialBridge : IDisposable
         Send("set_brightness", new() { ["level"] = level });
     }
     public void PushWeather() { if (_weather != null) SendRaw("weather", _weather.ToJson()); }
+    public void PushStatusNow()
+    {
+        if (!Connected || !_telemetryEnabled) return;
+        var snapshot = _status.Snapshot();
+        var alertSeq = Interlocked.Increment(ref _nextAlertSeq);
+        _ = Task.Run(() => PushUrgentStatus(snapshot, alertSeq));
+    }
+
+    async Task PushUrgentStatus(StatusSnapshot snapshot, int alertSeq)
+    {
+        var fields = new Dictionary<string, object>
+        {
+            ["alert_session"] = _alertSession,
+            ["alert_seq"] = alertSeq,
+            ["claude_needs_input"] = snapshot.Claude.NeedsInput,
+            ["codex_needs_input"] = snapshot.Codex.NeedsInput,
+            ["domestic_needs_input"] = snapshot.Domestic.NeedsInput,
+            ["completion_at"] = snapshot.Codex.CompletionAt,
+            ["completion_seq"] = snapshot.Codex.CompletionSeq,
+            ["completion_active"] = snapshot.Codex.CompletionActive,
+        };
+        for (var attempt = 0; attempt < 3 && Connected; attempt++)
+        {
+            var waiter = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            lock (_alertAckLock) _alertAckWaiters[alertSeq] = waiter;
+            Send("alert", fields);
+            var completed = await Task.WhenAny(waiter.Task, Task.Delay(750));
+            lock (_alertAckLock)
+            {
+                if (_alertAckWaiters.TryGetValue(alertSeq, out var current)
+                    && ReferenceEquals(current, waiter)) _alertAckWaiters.Remove(alertSeq);
+            }
+            if (completed == waiter.Task && await waiter.Task) return;
+        }
+        Console.Error.WriteLine($"[usb] alert {alertSeq} was not acknowledged");
+    }
     public void RequestInfo() => Send("get_info");
 
     public Task<bool> UploadGif(byte[] gif, string slot) =>

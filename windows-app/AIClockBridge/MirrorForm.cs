@@ -329,6 +329,7 @@ sealed class MirrorControl : Control
 
         using var providerFont = new Font("Consolas", 16, FontStyle.Bold, GraphicsUnit.Pixel);
         using var modelFont = new Font("Consolas", 12, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var membershipFont = new Font("Consolas", 10, FontStyle.Bold, GraphicsUnit.Pixel);
         using var smallFont = new Font("Consolas", 9, FontStyle.Regular, GraphicsUnit.Pixel);
         using var labelFont = new Font("Consolas", 12, FontStyle.Bold, GraphicsUnit.Pixel);
         var percentSize = planNumber.Length <= 3 ? 54 : planNumber.Length <= 6 ? 40
@@ -353,9 +354,26 @@ sealed class MirrorControl : Control
 
         g.FillEllipse(greenBrush, 21, 26, 8, 8);
         g.DrawString(provider, providerFont, greenBrush, 36, 22);
-        using (var right = new StringFormat(centered) { Alignment = StringAlignment.Far })
+        if (p.MembershipBadge && !string.IsNullOrEmpty(p.Model))
+        {
+            var badgeColor = Color.FromArgb(255, 159, 10);
+            var badgeWidth = Math.Clamp((int)Math.Ceiling(g.MeasureString(p.Model, membershipFont).Width) + 12,
+                                        34, 112);
+            var badgeRect = new RectangleF(218 - badgeWidth, 22, badgeWidth, 18);
+            using var badgePath = RoundedRect(badgeRect, 5);
+            using var badgeFill = new SolidBrush(Color.FromArgb(35, badgeColor));
+            using var badgeBorder = new Pen(badgeColor, 1);
+            using var badgeText = new SolidBrush(badgeColor);
+            g.FillPath(badgeFill, badgePath);
+            g.DrawPath(badgeBorder, badgePath);
+            g.DrawString(p.Model, membershipFont, badgeText, badgeRect, centered);
+        }
+        else
+        {
+            using var right = new StringFormat(centered) { Alignment = StringAlignment.Far };
             g.DrawString(string.IsNullOrEmpty(p.Model) ? "--" : p.Model, modelFont, Brushes.LightGray,
                          new RectangleF(106, 20, 112, 22), right);
+        }
         g.FillRectangle(mutedBrush, 20, 53, 200, 1);
         g.FillRectangle(greenBrush, 20, 53, 42, 1);
 

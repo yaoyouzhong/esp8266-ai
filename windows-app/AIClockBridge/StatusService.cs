@@ -44,6 +44,7 @@ class CodexStatus
 class DomesticProviderStatus
 {
     public string Model = "";
+    public bool MembershipBadge;
     public long TokensToday;
     public double? PlanPct = null;
     public string PlanPctText = "";
@@ -140,6 +141,7 @@ class StatusSnapshot
     {
         w.WriteStartObject(name);
         w.WriteString("model", p.Model);
+        w.WriteBoolean("membership_badge", p.MembershipBadge);
         w.WriteNumber("tokens_today", p.TokensToday);
         WriteNullable(w, "plan_pct", p.PlanPct);
         w.WriteString("plan_pct_text", p.PlanPctText);
@@ -222,6 +224,7 @@ sealed class StatusService
     public DomesticQuotaService DomesticUsage;
     public string DomesticProviderOverride = "qwen";
     public Action CodexCompletion;
+    public Action UrgentUpdate;
 
     /// Whether audio is playing right now (drives the device's AUTO -> music
     /// auto-switch). Set from NowPlayingMonitor in Program.
@@ -271,11 +274,12 @@ sealed class StatusService
     /// `message` is only sent for Claude's Notification hook.
     public void RecordEvent(string agent, string ev, string message = null)
     {
+        var changed = false;
         lock (_lock)
         {
             var now = Now();
             if (agent == "codex" && ev == "Stop")
-                SetCodexCompletion(now);
+                changed |= SetCodexCompletion(now);
             // Claude Notification: flash only for permission prompts, not for
             // "task done / waiting for your input" notifications.
             if (ev == "Notification")
@@ -284,29 +288,41 @@ sealed class StatusService
                 {
                     if (agent == "claude") _claudeNeedsInputAt = now;
                     else if (agent == "codex") _codexNeedsInputAt = now;
+                    changed = agent is "claude" or "codex";
                 }
-                return;
             }
-            if (AttentionEvents.Contains(ev))
+            else if (AttentionEvents.Contains(ev))
             {
                 if (agent == "claude") _claudeNeedsInputAt = now;
                 else if (agent == "codex") _codexNeedsInputAt = now;
-                return;
+                changed = agent is "claude" or "codex";
             }
-            string state;
-            if (WorkingEvents.Contains(ev)) state = "working";
-            else if (IdleEvents.Contains(ev)) state = "idle";
-            else return;
-            var e = new AgentEvent(state, now);
-            // any concrete lifecycle event means the prompt (if any) was answered
-            if (agent == "claude") { _claudeEvent = e; _claudeNeedsInputAt = null; }
-            else if (agent == "codex")
+            else
             {
-                _codexEvent = e;
-                _codexNeedsInputAt = null;
-                if (state == "working") _codexCompletionActive = false;
+                string state = null;
+                if (WorkingEvents.Contains(ev)) state = "working";
+                else if (IdleEvents.Contains(ev)) state = "idle";
+                if (state != null)
+                {
+                    var e = new AgentEvent(state, now);
+                    // any concrete lifecycle event means the prompt (if any) was answered
+                    if (agent == "claude")
+                    {
+                        _claudeEvent = e;
+                        _claudeNeedsInputAt = null;
+                        changed = true;
+                    }
+                    else if (agent == "codex")
+                    {
+                        _codexEvent = e;
+                        _codexNeedsInputAt = null;
+                        if (state == "working") _codexCompletionActive = false;
+                        changed = true;
+                    }
+                }
             }
         }
+        if (changed) QueueCallback(UrgentUpdate);
     }
 
     static bool NeedsInput(double? at, double now) => at.HasValue && now - at.Value < NeedsInputTTL;
@@ -356,14 +372,37 @@ sealed class StatusService
         provider.RemainingPctText = remaining.ToString("0.00", CultureInfo.InvariantCulture);
     }
 
-    void SetCodexCompletion(double completionAt)
+    static string QwenMembershipLabel(string membership)
     {
-        if (completionAt <= _codexCompletionObservedAt) return;
+        if (membership.Contains("团队", StringComparison.OrdinalIgnoreCase)
+            || membership.Contains("team", StringComparison.OrdinalIgnoreCase)) return "TEAM";
+        if (membership.Contains("企业", StringComparison.OrdinalIgnoreCase)
+            || membership.Contains("enterprise", StringComparison.OrdinalIgnoreCase)) return "ENTERPRISE";
+        if (membership.Contains("个人", StringComparison.OrdinalIgnoreCase)
+            || membership.Contains("personal", StringComparison.OrdinalIgnoreCase)
+            || membership.Contains("individual", StringComparison.OrdinalIgnoreCase)) return "PERSONAL";
+        if (membership.Contains("专业", StringComparison.OrdinalIgnoreCase)
+            || membership.Contains("professional", StringComparison.OrdinalIgnoreCase)) return "PRO";
+        if (membership.Contains("标准", StringComparison.OrdinalIgnoreCase)
+            || membership.Contains("standard", StringComparison.OrdinalIgnoreCase)) return "STANDARD";
+        if (membership.Contains("基础", StringComparison.OrdinalIgnoreCase)
+            || membership.Contains("basic", StringComparison.OrdinalIgnoreCase)) return "BASIC";
+        return "TOKEN PLAN";
+    }
+
+    bool SetCodexCompletion(double completionAt)
+    {
+        if (completionAt <= _codexCompletionObservedAt) return false;
         _codexCompletionObservedAt = completionAt;
         _codexCompletionAt = (long)completionAt;
         _codexCompletionSeq++;
         _codexCompletionActive = true;
-        var callback = CodexCompletion;
+        QueueCallback(CodexCompletion);
+        return true;
+    }
+
+    static void QueueCallback(Action callback)
+    {
         if (callback == null) return;
         ThreadPool.QueueUserWorkItem(_ =>
         {
@@ -373,7 +412,13 @@ sealed class StatusService
 
     public void AcknowledgeCodexCompletion()
     {
-        lock (_lock) _codexCompletionActive = false;
+        var changed = false;
+        lock (_lock)
+        {
+            changed = _codexCompletionActive;
+            _codexCompletionActive = false;
+        }
+        if (changed) QueueCallback(UrgentUpdate);
     }
 
     public bool CodexCompletionActive
@@ -431,6 +476,16 @@ sealed class StatusService
                 snap.Domestic.Kimi.PlanPct = du.KimiWeeklyPct;
                 snap.Domestic.Kimi.WeeklyPct = du.KimiWeeklyPct;
                 snap.Domestic.Kimi.FiveHourPct = du.KimiFiveHourPct;
+                if (!string.IsNullOrWhiteSpace(du.QwenMembership))
+                {
+                    snap.Domestic.Qwen.Model = QwenMembershipLabel(du.QwenMembership);
+                    snap.Domestic.Qwen.MembershipBadge = true;
+                }
+                if (!string.IsNullOrWhiteSpace(du.KimiMembership))
+                {
+                    snap.Domestic.Kimi.Model = du.KimiMembership;
+                    snap.Domestic.Kimi.MembershipBadge = true;
+                }
                 SetPercentDisplayText(snap.Domestic.Qwen);
                 SetPercentDisplayText(snap.Domestic.Xiaomi);
                 SetPercentDisplayText(snap.Domestic.Kimi);
@@ -736,9 +791,10 @@ sealed class StatusService
 
         if (latestTaskComplete > _codexCompletionObservedAt)
         {
-            SetCodexCompletion(latestTaskComplete);
+            var completionChanged = SetCodexCompletion(latestTaskComplete);
             _codexEvent = new AgentEvent("idle", latestTaskComplete);
             _codexNeedsInputAt = null;
+            if (completionChanged) QueueCallback(UrgentUpdate);
         }
 
         // Tokens + rate limits only from today's day directory.

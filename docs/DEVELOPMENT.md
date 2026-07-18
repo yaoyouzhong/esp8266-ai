@@ -23,6 +23,10 @@ ESP8266 板子上完成**，换形象不需要重新烧录（详见第 4 节）�
 Windows 版另有 USB 优先传输，CH340 串口为 460800：小型控制帧以 `@AICLOCK ` 开头，
 后接单行 JSON（协议 `version=1`）；图片/GIF/动画使用 `NUL + COBS + NUL` 二进制分块，
 含传输 ID、序号、长度、逐块 CRC32/ACK 和整包 CRC32。两者与普通固件日志共用串口。
+审批和任务完成提醒使用独立的紧凑 `alert` 控制帧；设备以 `alert_ack` 回执，桥接端超时会重试，
+并以会话号和序号拒绝乱序旧帧。新会话会重置完成事件的序号基线，避免桥接 App 重启后的
+`completion_seq=1` 被设备误判为上一进程的旧事件。该帧也避免完整状态 JSON 在屏幕刷新或
+图片传输期间因 ESP8266 UART 缓冲区拥塞而延迟或丢失。
 USB 覆盖状态、网速、完整音乐画面、天气、股票、设备控制、GIF 上传和镜像精灵读取；连续 8 秒未收到
 USB 心跳时固件自动回退 HTTP。图片在设备端边收边画，GIF 边收边写 LittleFS，均不缓存
 整个文件到 ESP8266 RAM。
@@ -330,8 +334,10 @@ Windows 会把股票名称和天气三块中文位图合并成 RLE 页面缓存�
 - 模型名和 `tokens_today`：扫描 `%USERPROFILE%\.claude\projects\**\*.jsonl`，所以只统计
   写入 Claude Code 会话日志的调用；其他应用即使共用同一个 Token Plan，也不会计入。
 - 订阅百分比：授权窗口在厂商控制台内读取账号页面已经返回的用量响应。阿里云百炼读取
-  Token Plan；月之暗面从 Kimi Coding Plan `BillingService/GetUsages` 响应的 `detail` 与
-  `limits[].detail` 计算 Weekly 和 5h 已用百分比。结果缓存到
+  Token Plan 及订阅版本；设备把团队版、企业版等版本映射为 `TEAM`、`ENTERPRISE` 等金色徽标。
+  月之暗面从 Kimi Coding Plan 页面响应读取会员权益，并从 `BillingService/GetUsages`
+  的 `detail` 与 `limits[].detail` 计算 Weekly 和 5h 已用百分比。当前单选厂商在启动时立即读取、随后每 2 分钟
+  使用持久化 WebView2 登录态后台刷新；同一厂商最少间隔 60 秒，供应商返回 429 时退避 5 分钟。结果缓存到
   `%APPDATA%\AIClockBridge\domestic-quota-cache.json`。
 
 阿里云和 Kimi 登录使用 `%APPDATA%\AIClockBridge\quota-auth-profile` 的独立 WebView2 profile。
@@ -357,9 +363,9 @@ Windows 每秒通过 `GetLastInputInfo` 读取系统键鼠空闲时间，超时�
 到时由 Windows 主动恢复原页面。审批提醒具有全局优先级，即使固定在股票、天气
 等页面也会切到对应桌宠并闪烁红色边框。Codex 收到 `Stop` hook，或桥接在 Codex Desktop
 会话 JSONL 末尾读到新的 `event_msg.payload.type = task_complete` 时触发完成提醒：Windows 播放一次
-系统提示音，设备四边完整绿框以独立 140 ms 节拍持续渐变脉冲并播放桌宠动画。多个任务完成会合并为同一个
-未确认状态；用户把 Codex 窗口切回前台或开始下一轮任务时，桥接清除状态并恢复真实额度进度环和提醒前的
-固定页面。JSONL 检测只读取桥接
+系统提示音，设备四边完整绿框以独立 140 ms 节拍做 5 次渐变脉冲并播放桌宠动画，随后恢复真实额度进度环
+和提醒前的固定页面。闪烁期间又有任务完成时，从新的完成序号重新计算 5 次；完成后出现的新事件会再次触发。
+JSONL 检测只读取桥接
 启动后发生变化的文件末尾，不修改或占用 Codex Desktop 自己的 `notify` 配置。
 
 ## 已知限制 / TODO

@@ -19,7 +19,7 @@ Windows 版功能：
   5 秒移动刷新一次，下方显示日期和中文星期。
 - **Codex 动作提醒**：`PermissionRequest` 会从任意固定页面切到 Codex，并以整圈红色边框闪烁；
   桥接同时识别 Codex Desktop 会话 JSONL 的 `task_complete` 和 Hook 的 `Stop`，触发四边
-  播放一次 Windows 系统提示音，同时持续显示完整绿框的平滑脉冲和桌宠动画；多个完成事件合并保持提醒，切回 Codex 或开始下一轮任务后恢复真实额度进度环和原固定页面，不要求修改 Codex Desktop 的
+  播放一次 Windows 系统提示音，同时显示完整绿框的 5 次平滑脉冲和桌宠动画；多个完成事件按最新完成序号重新触发，随后恢复真实额度进度环和原固定页面，不要求修改 Codex Desktop 的
   `notify` 配置。
 - 本地 HTTP 服务 `0.0.0.0:8765`：`/status`、`/net`、`/music`、`/stock`、`/weather` 及其
   RGB565 中文位图端点、`POST /event`（Claude Code / Codex hooks 秒级状态推送）
@@ -35,13 +35,14 @@ Windows 版功能：
   `claude-*` 模型，不把通过 Claude Code 客户端调用的千问算成 Claude 用量。
 - **国产模型额度授权**：左侧厂商导航列出阿里云百炼、月之暗面、小米 MiMo、智谱、火山方舟、
   月之暗面、MiniMax、DeepSeek、百度千帆、腾讯混元、华为盘古、讯飞星火、阶跃星辰、
-  百川和零一万物。阿里云百炼与月之暗面已接通准确额度捕获：前者显示 Token Plan，后者显示
-  Kimi Coding Plan Weekly/5h；小米已预留响应规则但尚未用真实订阅账号验证。其余厂商提供
+  百川和零一万物。阿里云百炼与月之暗面已接通准确额度捕获：前者显示 Token Plan，并把团队版等订阅版本显示为金色徽标；后者显示
+  Kimi Coding Plan 会员权益及 Weekly/5h，并与 Codex 一样在启动时立即读取、随后每 2 分钟后台刷新；自动或手动请求至少间隔 60 秒，供应商限流时退避 5 分钟。小米已预留响应规则但尚未用真实订阅账号验证。其余厂商提供
   登录入口并明确标为待接。打开授权页时会直接进入当前单选厂商。阿里和 Kimi 登录状态保留 30 天，
   每次成功读取自动续期；供应商主动撤销会话后需要重新登录。
 - **USB 优先桥接**：小时钟经 CH340 数据线连接时，App 自动识别 COM 口并通过
   460800 串口下发状态、网速、完整音乐画面、天气、股票，以及显示模式/亮度控制；GIF 桌宠上传和镜像
-  动画读取同样走 USB。大数据采用 COBS 二进制分块、逐块 CRC/ACK 和整包 CRC；USB 连续
+  动画读取同样走 USB。大数据采用 COBS 二进制分块、逐块 CRC/ACK 和整包 CRC；审批/完成提醒
+  使用带 ACK/重试的紧凑控制帧，避免被大数据传输阻塞；USB 连续
   8 秒无心跳后，固件自动恢复现有 WiFi HTTP 轮询
 - 数据来源同 Mac 版：`%USERPROFILE%\.claude\projects` / `%USERPROFILE%\.codex\sessions`
   的 JSONL 日志 + 各自官方用量接口（凭据读

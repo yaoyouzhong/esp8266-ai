@@ -51,6 +51,7 @@ sealed class TrayAppContext : ApplicationContext
     readonly Dictionary<int, ToolStripMenuItem> _cycleIntervalItems = new();
     readonly System.Windows.Forms.Timer _cycleTimer = new();
     readonly System.Windows.Forms.Timer _screenSaverTimer = new() { Interval = 1000 };
+    readonly System.Windows.Forms.Timer _domesticRefreshTimer = new() { Interval = 120 * 1000 };
     readonly Dictionary<int, ToolStripMenuItem> _screenSaverTimeoutItems = new();
     ToolStripMenuItem _screenSaverMenu;
     bool _cycleEnabled;
@@ -86,6 +87,7 @@ sealed class TrayAppContext : ApplicationContext
         LoadScreenSaverSettings();
         _cycleTimer.Tick += async (_, _) => await AdvanceCycle();
         _screenSaverTimer.Tick += async (_, _) => await ScreenSaverTick();
+        _domesticRefreshTimer.Tick += (_, _) => _domesticUsage.Refresh(_domesticProvider);
 
         BuildMenu();
         _trayIcon = new NotifyIcon
@@ -103,6 +105,7 @@ sealed class TrayAppContext : ApplicationContext
         {
             _startupItem.Checked = StartupManager.IsEnabled;
             _usage.Refresh();
+            _domesticUsage.Refresh(_domesticProvider);
             RefreshUsageLines();
             _ = RefreshDeviceSection();
         };
@@ -113,6 +116,8 @@ sealed class TrayAppContext : ApplicationContext
             _ = AdvanceCycle();
         }
         _screenSaverTimer.Start();
+        _domesticUsage.Refresh(_domesticProvider);
+        _domesticRefreshTimer.Start();
         _ = RecoverScreenSaverState();
     }
 
@@ -282,6 +287,7 @@ sealed class TrayAppContext : ApplicationContext
         serviceMenu.DropDownItems.Add(MakeItem("刷新状态", (_, _) =>
         {
             _usage.Refresh();
+            _domesticUsage.Refresh(_domesticProvider);
             RefreshUsageLines();
             _ = RefreshDeviceSection();
         }));
@@ -355,6 +361,7 @@ sealed class TrayAppContext : ApplicationContext
         _service.DomesticProviderOverride = provider;
         Settings.Set(DomesticProviderKey, provider);
         UpdateDomesticProviderMenu();
+        _domesticUsage.Refresh(provider);
         await SetDisplayMode("domestic");
     }
 

@@ -88,14 +88,20 @@ DisplayMode effectiveMode();
 bool screenSaverPreview = false;
 
 const uint8_t COMPLETION_PULSE_STEPS = 10;
-uint8_t completionFlashPhase = 0;
+const uint8_t COMPLETION_PULSE_COUNT = 5;
+const uint8_t COMPLETION_FLASH_PHASES = COMPLETION_PULSE_STEPS * COMPLETION_PULSE_COUNT;
+uint8_t completionFlashPhase = COMPLETION_FLASH_PHASES + 1;
 unsigned long completionFlashLastMs = 0;
 uint32_t codexCompletionSeq = 0;
 bool codexCompletionActive = false;
 bool codexCompletionInitialized = false;
+uint32_t usbAlertSession = 0;
+uint32_t usbAlertSeq = 0;
+bool usbAlertInitialized = false;
 
 bool completionAlertActive() {
-  return codexCompletionActive;
+  // The final phase restores the quota ring after five complete pulses.
+  return completionFlashPhase <= COMPLETION_FLASH_PHASES;
 }
 
 void startCodexCompletionAlert() {
@@ -262,6 +268,7 @@ struct CodexStatus {
 
 struct DomesticProviderStatus {
   String model;
+  bool membershipBadge = false;
   long tokensToday = 0;
   float planPct = -1;
   String planPctText;
@@ -869,19 +876,25 @@ void redrawRingOnly() {
   }
 }
 
-// Draw the persistent completion border on its own short cadence. It continues
-// until the Windows bridge acknowledges that Codex has returned to foreground.
+// Draw five smooth completion pulses on an independent cadence, then restore
+// the real quota ring exactly once.
 void drawCompletionPulse(unsigned long nowMs) {
   if (!completionAlertActive()
       || nowMs - completionFlashLastMs < COMPLETION_PULSE_INTERVAL_MS) return;
 
   completionFlashLastMs = nowMs;
-  static const uint8_t brightness[COMPLETION_PULSE_STEPS] = {
-    40, 88, 144, 208, 255, 255, 208, 144, 88, 0
-  };
-  uint8_t level = brightness[completionFlashPhase];
-  drawFullBorder(tft.color565(0, level, 0));
-  completionFlashPhase = (completionFlashPhase + 1) % COMPLETION_PULSE_STEPS;
+  if (completionFlashPhase < COMPLETION_FLASH_PHASES) {
+    static const uint8_t brightness[COMPLETION_PULSE_STEPS] = {
+      40, 88, 144, 208, 255, 255, 208, 144, 88, 0
+    };
+    uint8_t level = brightness[completionFlashPhase % COMPLETION_PULSE_STEPS];
+    drawFullBorder(tft.color565(0, level, 0));
+    completionFlashPhase++;
+    return;
+  }
+
+  redrawRingOnly();
+  completionFlashPhase++;
 }
 
 // Who gets the screen:
@@ -1206,11 +1219,23 @@ void drawDomesticScreen(bool force = false) {
     tft.setTextColor(mutedColor, panelColor);
     tft.drawString(isKimi ? "USAGE" : "TOKENS", 35, 201, 1);
   }
-  if (force || !domesticDrawCache.initialized || model != domesticDrawCache.model) {
+  if (force || !domesticDrawCache.initialized || model != domesticDrawCache.model
+      || provider != domesticDrawCache.provider) {
     tft.fillRect(106, 20, 114, 22, TFT_BLACK);
-    tft.setTextDatum(TR_DATUM);
-    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-    tft.drawString(model, 218, 24, 2);
+    if (p.membershipBadge && p.model.length()) {
+      const uint16_t badgeColor = TFT_ORANGE;
+      int w = constrain(tft.textWidth(model, 2) + 12, 34, 112);
+      int x = 218 - w;
+      tft.fillRoundRect(x, 22, w, 18, 5, TFT_BLACK);
+      tft.drawRoundRect(x, 22, w, 18, 5, badgeColor);
+      tft.setTextDatum(MC_DATUM);
+      tft.setTextColor(badgeColor, TFT_BLACK);
+      tft.drawString(model, x + w / 2, 31, 2);
+    } else {
+      tft.setTextDatum(TR_DATUM);
+      tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+      tft.drawString(model, 218, 24, 2);
+    }
   }
   if (force || !domesticDrawCache.initialized || plan != domesticDrawCache.plan) {
     tft.fillRect(28, 90, 184, 54, TFT_BLACK);
@@ -2080,6 +2105,7 @@ void setupWiFi() {
 void readDomesticProvider(JsonObject source, DomesticProviderStatus &target) {
   if (source.isNull()) return;
   target.model = source["model"] | "";
+  target.membershipBadge = source["membership_badge"] | false;
   target.tokensToday = source["tokens_today"] | 0;
   target.planPct = source["plan_pct"] | -1.0;
   target.planPctText = source["plan_pct_text"] | "";
@@ -2088,7 +2114,33 @@ void readDomesticProvider(JsonObject source, DomesticProviderStatus &target) {
   target.weeklyPct = source["weekly_pct"] | -1.0;
 }
 
-bool parseStatusJson(const String &payload) {
+void applyCodexCompletionState(uint32_t incomingCompletionAt,
+                               uint32_t incomingCompletionSeq,
+                               bool incomingCompletionActive) {
+  if (!codexCompletionInitialized) {
+    bool wasActive = codexCompletionActive || completionAlertActive();
+    codexCompletionInitialized = true;
+    codexStatus.completionAt = incomingCompletionAt;
+    codexCompletionSeq = incomingCompletionSeq;
+    if (incomingCompletionActive) startCodexCompletionAlert();
+    else {
+      codexCompletionActive = false;
+      completionFlashPhase = COMPLETION_FLASH_PHASES + 1;
+      if (wasActive) redrawRingOnly();
+    }
+    return;
+  }
+  bool wasActive = codexCompletionActive;
+  if (incomingCompletionSeq > codexCompletionSeq) {
+    codexCompletionSeq = incomingCompletionSeq;
+    codexStatus.completionAt = incomingCompletionAt;
+    if (incomingCompletionActive) startCodexCompletionAlert();
+  }
+  codexCompletionActive = incomingCompletionActive;
+  if (wasActive && !codexCompletionActive) redrawRingOnly();
+}
+
+bool parseStatusJson(const String &payload, bool applyAlertState = true) {
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, payload);
   if (err) return false;
@@ -2104,7 +2156,7 @@ bool parseStatusJson(const String &payload) {
     claudeStatus.fiveHourResetMin = c["five_hour_reset_min"] | -1;
     claudeStatus.sevenDayPct = c["seven_day_pct"] | -1.0;
     claudeStatus.sevenDayResetMin = c["seven_day_reset_min"] | -1;
-    claudeStatus.needsInput = c["needs_input"] | false;
+    if (applyAlertState) claudeStatus.needsInput = c["needs_input"] | false;
   }
 
   JsonObject x = doc["codex"];
@@ -2116,31 +2168,20 @@ bool parseStatusJson(const String &payload) {
     codexStatus.primaryResetMin = x["primary_reset_min"] | -1;
     codexStatus.weeklyPct = x["weekly_pct"] | -1.0;
     codexStatus.weeklyResetMin = x["weekly_reset_min"] | -1;
-    codexStatus.needsInput = x["needs_input"] | false;
-    uint32_t incomingCompletionAt = x["completion_at"] | 0UL;
-    uint32_t incomingCompletionSeq = x["completion_seq"] | incomingCompletionAt;
-    bool incomingCompletionActive = x["completion_active"] | false;
-    if (!codexCompletionInitialized) {
-      codexCompletionInitialized = true;
-      codexStatus.completionAt = incomingCompletionAt;
-      codexCompletionSeq = incomingCompletionSeq;
-      if (incomingCompletionActive) startCodexCompletionAlert();
-    } else {
-      bool wasActive = codexCompletionActive;
-      if (incomingCompletionSeq > codexCompletionSeq) {
-        codexCompletionSeq = incomingCompletionSeq;
-        codexStatus.completionAt = incomingCompletionAt;
-        if (incomingCompletionActive) startCodexCompletionAlert();
-      }
-      codexCompletionActive = incomingCompletionActive;
-      if (wasActive && !codexCompletionActive) redrawRingOnly();
+    if (applyAlertState) {
+      codexStatus.needsInput = x["needs_input"] | false;
+      uint32_t incomingCompletionAt = x["completion_at"] | 0UL;
+      uint32_t incomingCompletionSeq = x["completion_seq"] | incomingCompletionAt;
+      bool incomingCompletionActive = x["completion_active"] | false;
+      applyCodexCompletionState(incomingCompletionAt, incomingCompletionSeq,
+                                incomingCompletionActive);
     }
   }
   JsonObject d = doc["domestic"];
   if (!d.isNull()) {
     domesticStatus.status = d["status"] | "offline";
     domesticStatus.activeProvider = d["active_provider"] | "";
-    domesticStatus.needsInput = d["needs_input"] | false;
+    if (applyAlertState) domesticStatus.needsInput = d["needs_input"] | false;
     readDomesticProvider(d["qwen"], domesticStatus.qwen);
     readDomesticProvider(d["xiaomi"], domesticStatus.xiaomi);
     JsonObject active = d["active"];
@@ -2452,6 +2493,15 @@ void sendUsbFrame(const char *type, const String &data = "") {
     Serial.print(",\"data\":");
     Serial.print(data);
   }
+  Serial.println("}");
+}
+
+void sendUsbAlertAck(uint32_t alertSession, uint32_t alertSeq) {
+  Serial.print(USB_FRAME_PREFIX);
+  Serial.print("{\"type\":\"alert_ack\",\"version\":1,\"alert_session\":");
+  Serial.print(alertSession);
+  Serial.print(",\"alert_seq\":");
+  Serial.print(alertSeq);
   Serial.println("}");
 }
 
@@ -2947,7 +2997,7 @@ void handleUsbFrame(const String &json) {
   if (type == "status") {
     String payload;
     serializeJson(doc["data"], payload);
-    if (parseStatusJson(payload)) {
+    if (parseStatusJson(payload, !usbAlertInitialized)) {
       lastUsbStatusMs = millis();
       everUsbStatus = true;
       lastSuccessMs = millis();
@@ -2964,6 +3014,44 @@ void handleUsbFrame(const String &json) {
       }
       sendUsbFrame("status_ack");
     }
+    return;
+  }
+  if (type == "alert") {
+    uint32_t alertSession = doc["alert_session"] | 0UL;
+    uint32_t alertSeq = doc["alert_seq"] | 0UL;
+    bool newer = !usbAlertInitialized || alertSession != usbAlertSession
+                 || (int32_t)(alertSeq - usbAlertSeq) > 0;
+    if (newer) {
+      bool newSession = !usbAlertInitialized || alertSession != usbAlertSession;
+      usbAlertInitialized = true;
+      usbAlertSession = alertSession;
+      usbAlertSeq = alertSeq;
+      // The Windows bridge owns completion_seq only within one process.
+      // A fresh alert session therefore establishes a new device baseline;
+      // otherwise seq=1 after an app restart looks older than the previous run.
+      if (newSession) codexCompletionInitialized = false;
+      if (!doc["claude_needs_input"].isNull())
+        claudeStatus.needsInput = doc["claude_needs_input"] | false;
+      if (!doc["codex_needs_input"].isNull())
+        codexStatus.needsInput = doc["codex_needs_input"] | false;
+      if (!doc["domestic_needs_input"].isNull())
+        domesticStatus.needsInput = doc["domestic_needs_input"] | false;
+      applyCodexCompletionState(doc["completion_at"] | 0UL,
+                                doc["completion_seq"] | 0UL,
+                                doc["completion_active"] | false);
+    }
+    lastUsbStatusMs = millis();
+    everUsbStatus = true;
+    DisplayMode eff = effectiveMode();
+    if (eff == MODE_DOMESTIC) {
+      drawDomesticScreen();
+    } else if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK
+               && eff != MODE_WEATHER && eff != MODE_SCREENSAVER
+               && eff != MODE_DUAL) {
+      if (updateActiveApp()) drawActiveApp();
+      else refreshActiveApp();
+    }
+    sendUsbAlertAck(alertSession, alertSeq);
     return;
   }
   if (type == "binary_begin") {
