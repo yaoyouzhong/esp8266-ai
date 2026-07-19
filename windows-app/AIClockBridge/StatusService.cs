@@ -363,7 +363,8 @@ sealed class StatusService
     sealed record ClaudeFileSummary(
         long ClaudeTokens, double ClaudeActivity,
         long QwenTokens, string QwenModel, double QwenActivity,
-        long XiaomiTokens, string XiaomiModel, double XiaomiActivity);
+        long XiaomiTokens, string XiaomiModel, double XiaomiActivity,
+        long KimiTokens, string KimiModel, double KimiActivity);
 
     // Claude Code JSONL files are append-only. Reuse the parsed aggregate until
     // the file mtime changes instead of rereading the full history every 5s.
@@ -535,8 +536,9 @@ sealed class StatusService
                 }
             }
             var domesticIsCurrent = snap.Domestic.ActiveProvider.Length > 0
-                && Math.Max(snap.Domestic.Qwen.LastActivityEpoch,
-                            snap.Domestic.Xiaomi.LastActivityEpoch) > now - IdleThreshold;
+                && Math.Max(Math.Max(snap.Domestic.Qwen.LastActivityEpoch,
+                                     snap.Domestic.Xiaomi.LastActivityEpoch),
+                            snap.Domestic.Kimi.LastActivityEpoch) > now - IdleThreshold;
             if (domesticIsCurrent)
             {
                 snap.Domestic.Status = OverrideStatus(snap.Domestic.Status, _claudeEvent, now);
@@ -631,6 +633,8 @@ sealed class StatusService
         if (m.StartsWith("claude-") || m.Contains("/claude-")) return "claude";
         if (m.StartsWith("qwen") || m.Contains("/qwen")) return "qwen";
         if (m.StartsWith("mimo") || m.Contains("/mimo") || m.Contains("xiaomi")) return "xiaomi";
+        if (m.StartsWith("kimi") || m.Contains("/kimi") || m.StartsWith("moonshot")
+            || m.Contains("/moonshot") || m == "k3") return "kimi";
         return "";
     }
 
@@ -721,6 +725,8 @@ sealed class StatusService
                     summary.QwenModel, summary.QwenActivity);
                 MergeDomesticFile(domestic.Xiaomi, summary.XiaomiTokens,
                     summary.XiaomiModel, summary.XiaomiActivity);
+                MergeDomesticFile(domestic.Kimi, summary.KimiTokens,
+                    summary.KimiModel, summary.KimiActivity);
             }
 
             var stale = _claudeFileCache.Keys.Where(path => !livePaths.Contains(path)).ToArray();
@@ -730,8 +736,11 @@ sealed class StatusService
         claude.Status = StatusFromDelta(lastClaudeActivity > 0 ? now - lastClaudeActivity : 1e9);
         var qwenAt = domestic.Qwen.LastActivityEpoch;
         var xiaomiAt = domestic.Xiaomi.LastActivityEpoch;
-        var latestDomestic = Math.Max(qwenAt, xiaomiAt);
-        domestic.ActiveProvider = latestDomestic <= 0 ? "" : qwenAt >= xiaomiAt ? "qwen" : "xiaomi";
+        var kimiAt = domestic.Kimi.LastActivityEpoch;
+        var latestDomestic = Math.Max(Math.Max(qwenAt, xiaomiAt), kimiAt);
+        domestic.ActiveProvider = latestDomestic <= 0 ? ""
+            : kimiAt >= qwenAt && kimiAt >= xiaomiAt ? "kimi"
+            : qwenAt >= xiaomiAt ? "qwen" : "xiaomi";
         domestic.Status = StatusFromDelta(latestDomestic > 0 ? now - latestDomestic : 1e9);
         return claude;
     }
@@ -749,9 +758,9 @@ sealed class StatusService
 
     static ClaudeFileSummary ParseClaudeFile(string[] lines, double todayStart, double mtime)
     {
-        long claudeTokens = 0, qwenTokens = 0, xiaomiTokens = 0;
-        double claudeAt = 0, qwenAt = 0, xiaomiAt = 0;
-        string qwenModel = "", xiaomiModel = "";
+        long claudeTokens = 0, qwenTokens = 0, xiaomiTokens = 0, kimiTokens = 0;
+        double claudeAt = 0, qwenAt = 0, xiaomiAt = 0, kimiAt = 0;
+        string qwenModel = "", xiaomiModel = "", kimiModel = "";
         foreach (var line in lines)
         {
             if (!line.Contains("\"usage\":{")) continue;
@@ -781,15 +790,21 @@ sealed class StatusService
                     qwenTokens += tokens;
                     if (activity >= qwenAt) { qwenAt = activity; qwenModel = model; }
                 }
-                else
+                else if (provider == "xiaomi")
                 {
                     xiaomiTokens += tokens;
                     if (activity >= xiaomiAt) { xiaomiAt = activity; xiaomiModel = model; }
                 }
+                else
+                {
+                    kimiTokens += tokens;
+                    if (activity >= kimiAt) { kimiAt = activity; kimiModel = model; }
+                }
             }
         }
         return new ClaudeFileSummary(claudeTokens, claudeAt,
-            qwenTokens, qwenModel, qwenAt, xiaomiTokens, xiaomiModel, xiaomiAt);
+            qwenTokens, qwenModel, qwenAt, xiaomiTokens, xiaomiModel, xiaomiAt,
+            kimiTokens, kimiModel, kimiAt);
     }
 
     // MARK: - Codex

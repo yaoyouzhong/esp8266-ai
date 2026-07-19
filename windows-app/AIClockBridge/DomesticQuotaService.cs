@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -65,7 +66,8 @@ sealed class DomesticQuotaService
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "AIClockBridge", "domestic-quota-cache.json");
     readonly object _lock = new();
-    readonly Dictionary<string, DateTime> _nextAllowedRefresh = new();
+    readonly Dictionary<string, DateTime> _lastRefreshAttempt = new();
+    readonly Dictionary<string, DateTime> _backoffUntil = new();
     DomesticQuotaSnapshot _snapshot = Load();
     DomesticQuotaAuthForm _form;
 
@@ -102,15 +104,18 @@ sealed class DomesticQuotaService
         _form.ShowAuthorization(providerId);
     }
 
-    public void Refresh(string providerId)
+    public void Refresh(string providerId, bool force = false)
     {
         var provider = DomesticProviderCatalog.All.FirstOrDefault(x => x.Id == providerId);
         if (provider?.CaptureSupported != true) return;
         lock (_lock)
         {
-            if (_nextAllowedRefresh.TryGetValue(providerId, out var next)
-                && DateTime.UtcNow < next) return;
-            _nextAllowedRefresh[providerId] = DateTime.UtcNow + MinRefreshInterval;
+            var now = DateTime.UtcNow;
+            if (_backoffUntil.TryGetValue(providerId, out var blockedUntil)
+                && now < blockedUntil) return;
+            if (!force && _lastRefreshAttempt.TryGetValue(providerId, out var lastAttempt)
+                && now - lastAttempt < MinRefreshInterval) return;
+            _lastRefreshAttempt[providerId] = now;
         }
         if (_form == null || _form.IsDisposed)
             _form = new DomesticQuotaAuthForm(this, initialProviderId: providerId);
@@ -122,8 +127,8 @@ sealed class DomesticQuotaService
         lock (_lock)
         {
             var next = DateTime.UtcNow + RateLimitBackoff;
-            if (!_nextAllowedRefresh.TryGetValue(providerId, out var current) || current < next)
-                _nextAllowedRefresh[providerId] = next;
+            if (!_backoffUntil.TryGetValue(providerId, out var current) || current < next)
+                _backoffUntil[providerId] = next;
         }
     }
 
@@ -162,12 +167,15 @@ sealed class DomesticQuotaService
         lock (_lock) { _snapshot.XiaomiPlanPct = Clamp(pct); _snapshot.XiaomiFetchedAt = DateTime.UtcNow; Save(); }
     }
 
-    internal void SetKimi(double weeklyPct, double? fiveHourPct, string membership = null)
+    internal void SetKimi(double weeklyPct, double? fiveHourPct, string membership = null,
+        DateTimeOffset? weeklyResetAt = null, DateTimeOffset? fiveHourResetAt = null)
     {
         lock (_lock)
         {
             _snapshot.KimiWeeklyPct = Clamp(weeklyPct);
             _snapshot.KimiFiveHourPct = fiveHourPct.HasValue ? Clamp(fiveHourPct.Value) : null;
+            if (weeklyResetAt.HasValue) _snapshot.KimiWeeklyResetAt = weeklyResetAt;
+            if (fiveHourResetAt.HasValue) _snapshot.KimiFiveHourResetAt = fiveHourResetAt;
             if (!string.IsNullOrWhiteSpace(membership))
             {
                 _snapshot.KimiMembership = membership.Trim();
@@ -200,9 +208,13 @@ sealed class DomesticQuotaService
                 _snapshot.KimiMembership = membership.Trim();
                 Settings.Set("kimi_membership", _snapshot.KimiMembership);
             }
-            if (ParseResetAt(weeklyResetText) is DateTimeOffset weeklyResetAt)
+            if (ParseResetAt(weeklyResetText) is DateTimeOffset weeklyResetAt
+                && (!_snapshot.KimiWeeklyResetAt.HasValue
+                    || _snapshot.KimiWeeklyResetAt <= DateTimeOffset.Now))
                 _snapshot.KimiWeeklyResetAt = weeklyResetAt;
-            if (ParseResetAt(fiveHourResetText) is DateTimeOffset fiveHourResetAt)
+            if (ParseResetAt(fiveHourResetText) is DateTimeOffset fiveHourResetAt
+                && (!_snapshot.KimiFiveHourResetAt.HasValue
+                    || _snapshot.KimiFiveHourResetAt <= DateTimeOffset.Now))
                 _snapshot.KimiFiveHourResetAt = fiveHourResetAt;
             Save();
         }
@@ -230,14 +242,15 @@ sealed class DomesticQuotaService
         double minutes = 0;
         var matched = false;
         foreach (Match match in Regex.Matches(text,
-                     @"(?<value>\d+(?:\.\d+)?)\s*(?<unit>天|小时|时|分钟|分|days?|hours?|hrs?|minutes?|mins?)",
+                     @"(?<value>\d+(?:\.\d+)?)\s*(?<unit>天|小时|时|分钟|分|days?|d|hours?|hrs?|h|minutes?|mins?|m)",
                      RegexOptions.IgnoreCase))
         {
             if (!double.TryParse(match.Groups["value"].Value, NumberStyles.Float,
                     CultureInfo.InvariantCulture, out var value)) continue;
             var unit = match.Groups["unit"].Value.ToLowerInvariant();
-            minutes += unit.StartsWith("天") || unit.StartsWith("day") ? value * 1440
+            minutes += unit.StartsWith("天") || unit.StartsWith("day") || unit == "d" ? value * 1440
                 : unit.StartsWith("小时") || unit == "时" || unit.StartsWith("hour") || unit.StartsWith("hr")
+                    || unit == "h"
                     ? value * 60 : value;
             matched = true;
         }
@@ -277,6 +290,16 @@ sealed class DomesticQuotaService
 
 sealed class DomesticQuotaAuthForm : Form
 {
+    const int GwlExStyle = -20;
+    const long WsExTransparent = 0x00000020L;
+    const long WsExNoActivate = 0x08000000L;
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    static extern nint GetWindowLongPtr(nint window, int index);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+    static extern nint SetWindowLongPtr(nint window, int index, nint value);
+
     static readonly TimeSpan LoginRetention = TimeSpan.FromDays(30);
 
     readonly DomesticQuotaService _service;
@@ -380,6 +403,11 @@ sealed class DomesticQuotaAuthForm : Form
     {
         _initialProviderId = providerId;
         _backgroundRefresh = false;
+        Enabled = true;
+        FormBorderStyle = FormBorderStyle.Sizable;
+        MinimumSize = new Size(900, 620);
+        if (_providerTitle.Parent != null) _providerTitle.Parent.Visible = true;
+        _status.Visible = true;
         ShowInTaskbar = true;
         Opacity = 1;
         var targetScreen = Screen.FromPoint(Cursor.Position);
@@ -389,6 +417,7 @@ sealed class DomesticQuotaAuthForm : Form
         TopMost = true;
         var wasEverShown = _everShown;
         if (!Visible) Show();
+        SetBackgroundWindowStyle(false);
         WindowState = FormWindowState.Maximized;
         if (wasEverShown) BeginInvoke(async () => await SelectProvider(ProviderById(providerId)));
         BringToFront();
@@ -402,18 +431,39 @@ sealed class DomesticQuotaAuthForm : Form
         _initialProviderId = providerId;
         _backgroundRefresh = true;
         ShowInTaskbar = false;
-        Opacity = 0;
+        FormBorderStyle = FormBorderStyle.None;
+        MinimumSize = Size.Empty;
+        if (_providerTitle.Parent != null) _providerTitle.Parent.Visible = false;
+        _status.Visible = false;
+        // Alibaba only creates its signed quota POST while WebView2 owns a
+        // renderable viewport. A nearly invisible 16px viewport is enough;
+        // click-through + no-activate styles keep it out of the user's way.
+        Opacity = 0.01;
         StartPosition = FormStartPosition.Manual;
         WindowState = FormWindowState.Normal;
-        Location = new Point(-32000, -32000);
+        var area = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1920, 1080);
+        Bounds = new Rectangle(area.Right - 16, area.Top, 16, 16);
+        TopMost = true;
         var wasEverShown = _everShown;
         if (!Visible) Show();
+        SetBackgroundWindowStyle(true);
         if (wasEverShown) BeginInvoke(async () => await SelectProvider(ProviderById(providerId)));
     }
 
     static DomesticProviderDefinition ProviderById(string providerId) =>
         DomesticProviderCatalog.All.FirstOrDefault(x => x.Id == providerId)
         ?? DomesticProviderCatalog.All[0];
+
+    protected override bool ShowWithoutActivation => _backgroundRefresh;
+
+    void SetBackgroundWindowStyle(bool background)
+    {
+        if (!IsHandleCreated) return;
+        var style = GetWindowLongPtr(Handle, GwlExStyle).ToInt64();
+        var flags = WsExTransparent | WsExNoActivate;
+        style = background ? style | flags : style & ~flags;
+        SetWindowLongPtr(Handle, GwlExStyle, new nint(style));
+    }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
@@ -505,7 +555,9 @@ sealed class DomesticQuotaAuthForm : Form
                 if (e.IsSuccess && _activeProvider?.Id == "kimi")
                     _ = CaptureKimiPageMetadata(_navigationGeneration);
                 if (e.IsSuccess && _activeProvider?.Id == "qwen")
+                {
                     _ = CaptureQwenPageMetadata(_navigationGeneration);
+                }
             };
         }
         _status.Text = provider.CaptureSupported
@@ -600,17 +652,29 @@ sealed class DomesticQuotaAuthForm : Form
             (() => {
               const text = document.body ? document.body.innerText : '';
               const reset = text.match(/重置时间\s*([0-9]{4}[-\/.]\d{1,2}[-\/.]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?)/);
+              const candidates = Array.from(document.querySelectorAll(
+                '[class*="card"], [class*="panel"], [class*="quota"], [class*="usage"]'))
+                .map(node => node.innerText || '')
+                .filter(value => /用量消耗|usage\s+consumption/i.test(value) && /\d+(?:\.\d+)?\s*%/.test(value))
+                .sort((a, b) => a.length - b.length);
+              const marker = text.search(/用量消耗|usage\s+consumption/i);
+              const fallback = marker >= 0 ? text.slice(marker, marker + 800) : '';
+              const usage = (candidates[0] || fallback).match(/(\d+(?:\.\d+)?)\s*%/);
               let membership = '';
               if (/Coding\s*Plan/i.test(text)) membership = 'Coding Plan';
               else if (/Token\s*Plan/i.test(text) && /团队版/i.test(text)) membership = 'Token Plan 团队版';
               else if (/Token\s*Plan/i.test(text)) membership = 'Token Plan';
-              return { resetText: reset ? reset[1] : '', membership };
+              return {
+                resetText: reset ? reset[1] : '',
+                usagePctText: usage ? usage[1] : '',
+                membership
+              };
             })()
             """;
-        for (var attempt = 0; attempt < 20; attempt++)
+        for (var attempt = 0; attempt < 80; attempt++)
         {
             if (IsDisposed || generation != _navigationGeneration || _activeProvider?.Id != "qwen"
-                || _web.CoreWebView2 == null) return;
+                || _web.CoreWebView2 == null || _capturedForNavigation) return;
             try
             {
                 var result = await _web.CoreWebView2.ExecuteScriptAsync(script);
@@ -618,10 +682,20 @@ sealed class DomesticQuotaAuthForm : Form
                 var root = doc.RootElement;
                 var reset = root.TryGetProperty("resetText", out var resetValue)
                     ? resetValue.GetString()?.Trim() ?? "" : "";
+                var usagePctText = root.TryGetProperty("usagePctText", out var usagePctValue)
+                    ? usagePctValue.GetString()?.Trim() ?? "" : "";
                 var membership = root.TryGetProperty("membership", out var membershipValue)
                     ? membershipValue.GetString()?.Trim() ?? "" : "";
                 _service.SetQwenPageMetadata(reset, membership);
-                if (reset.Length > 0) return;
+                if (double.TryParse(usagePctText, NumberStyles.Float,
+                        CultureInfo.InvariantCulture, out var usagePct)
+                    && usagePct is >= 0 and <= 100)
+                {
+                    _service.SetQwen(usagePct, membership, DomesticQuotaService.ParseResetAt(reset));
+                    _capturedForNavigation = true;
+                    if (_backgroundRefresh) BeginInvoke(Hide);
+                    return;
+                }
             }
             catch
             {
@@ -633,7 +707,7 @@ sealed class DomesticQuotaAuthForm : Form
 
     async Task ShowPendingStatus(DomesticProviderDefinition provider, int generation)
     {
-        await Task.Delay(TimeSpan.FromSeconds(12));
+        await Task.Delay(TimeSpan.FromSeconds(provider.Id == "qwen" ? 45 : 12));
         if (IsDisposed || generation != _navigationGeneration || _activeProvider != provider
             || _capturedForNavigation) return;
         var snapshot = _service.Snapshot;
@@ -736,7 +810,8 @@ sealed class DomesticQuotaAuthForm : Form
                 }
                 weeklyPct = kimi.Value.WeeklyPct;
                 fiveHourPct = kimi.Value.FiveHourPct;
-                _service.SetKimi(weeklyPct, fiveHourPct, membership);
+                _service.SetKimi(weeklyPct, fiveHourPct, membership,
+                    kimi.Value.WeeklyResetAt, kimi.Value.FiveHourResetAt);
             }
             else
             {
@@ -797,7 +872,8 @@ sealed class DomesticQuotaAuthForm : Form
         }
     }
 
-    readonly record struct KimiUsage(double WeeklyPct, double? FiveHourPct);
+    readonly record struct KimiUsage(double WeeklyPct, double? FiveHourPct,
+        DateTimeOffset? WeeklyResetAt, DateTimeOffset? FiveHourResetAt);
     readonly record struct QwenUsage(double Pct, DateTimeOffset? ResetAt);
 
     static QwenUsage? FindQwenUsage(JsonElement element)
@@ -845,6 +921,49 @@ sealed class DomesticQuotaAuthForm : Form
         }
         catch (ArgumentOutOfRangeException) { }
         return null;
+    }
+
+    static DateTimeOffset? FindDirectResetAt(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object) return null;
+        foreach (var property in element.EnumerateObject())
+        {
+            var name = property.Name.ToLowerInvariant();
+            if (!name.Contains("reset") && !name.Contains("refresh")
+                && !name.Contains("expire") && !name.Contains("expiry")
+                && !name.Contains("end_time") && !name.Contains("endtime")) continue;
+            if (DateTimeValue(property.Value) is DateTimeOffset absolute)
+                return absolute;
+            if (RelativeResetAt(name, property.Value) is DateTimeOffset relative)
+                return relative;
+        }
+        return null;
+    }
+
+    static DateTimeOffset? FindResetAt(JsonElement element)
+    {
+        if (FindDirectResetAt(element) is DateTimeOffset direct) return direct;
+        if (element.ValueKind != JsonValueKind.Object) return null;
+        foreach (var property in element.EnumerateObject())
+        {
+            if (property.Value.ValueKind is not (JsonValueKind.Object or JsonValueKind.Array)) continue;
+            if (FindResetAt(property.Value) is DateTimeOffset nested) return nested;
+        }
+        return null;
+    }
+
+    static DateTimeOffset? RelativeResetAt(string name, JsonElement value)
+    {
+        if (value.ValueKind == JsonValueKind.String)
+            return DomesticQuotaService.ParseResetAt(value.GetString());
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetDouble(out var amount)
+            || amount <= 0) return null;
+        double seconds;
+        if (name.Contains("millisecond") || name.EndsWith("_ms")) seconds = amount / 1000.0;
+        else if (name.Contains("minute") || name.EndsWith("_min")) seconds = amount * 60.0;
+        else if (name.Contains("hour")) seconds = amount * 3600.0;
+        else seconds = amount;
+        return seconds <= 31 * 24 * 3600 ? DateTimeOffset.Now.AddSeconds(seconds) : null;
     }
 
     static string FindKimiMembership(JsonElement element)
@@ -898,7 +1017,9 @@ sealed class DomesticQuotaAuthForm : Form
                     if (!usageValues.TryGetValue("detail", out var detail)) continue;
                     var weeklyPct = PercentageFromRemaining(detail);
                     if (!weeklyPct.HasValue) continue;
+                    var weeklyResetAt = FindResetAt(detail) ?? FindDirectResetAt(usage);
                     double? fiveHourPct = null;
+                    DateTimeOffset? fiveHourResetAt = null;
                     if (usageValues.TryGetValue("limits", out var limits)
                         && limits.ValueKind == JsonValueKind.Array)
                     {
@@ -911,11 +1032,13 @@ sealed class DomesticQuotaAuthForm : Form
                                 && PercentageFromRemaining(rateDetail) is double ratePct)
                             {
                                 fiveHourPct = ratePct;
+                                fiveHourResetAt = FindResetAt(rateDetail) ?? FindDirectResetAt(limit);
                                 break;
                             }
                         }
                     }
-                    return new KimiUsage(weeklyPct.Value, fiveHourPct);
+                    return new KimiUsage(weeklyPct.Value, fiveHourPct,
+                        weeklyResetAt, fiveHourResetAt);
                 }
             }
             foreach (var child in values.Values)

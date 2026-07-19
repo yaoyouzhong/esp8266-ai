@@ -17,7 +17,7 @@ sealed class TrayAppContext : ApplicationContext
     const string ScreenSaverPreviousModeKey = "screensaver_previous_mode";
     static readonly (string Title, string Mode)[] DisplayModes =
     {
-        ("自动（谁在干活显示谁）", "auto"), ("Claude", "claude"),
+        ("智能跟随", "auto"), ("Claude", "claude"),
         ("Codex", "codex"), ("Claude + Codex 额度", "dual"), ("国产模型", "domestic"),
         ("系统监控", "net"), ("音乐播放", "music"), ("股票行情", "stock"),
         ("天气时钟", "weather"),
@@ -363,7 +363,7 @@ sealed class TrayAppContext : ApplicationContext
         _service.DomesticProviderOverride = provider;
         Settings.Set(DomesticProviderKey, provider);
         UpdateDomesticProviderMenu();
-        _domesticUsage.Refresh(provider);
+        _domesticUsage.Refresh(provider, force: true);
         await SetDisplayMode("domestic");
     }
 
