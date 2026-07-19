@@ -25,8 +25,10 @@ sealed class MirrorControl : Control
     public double RingPct;
     public bool NeedsInput; // shown app waiting on approval -> red border flash
     public bool FlashOn;
-    public string Line1 = "5h -";
-    public string Line2 = "Weekly -";
+    public double? FiveHourPct;
+    public int? FiveHourResetMin;
+    public double? WeeklyPct;
+    public int? WeeklyResetMin;
     public string Plan = "";
     public bool ShowingClaude = true;
     public bool DeviceOK;
@@ -188,12 +190,46 @@ sealed class MirrorControl : Control
         g.DrawImage(ShowingClaude ? ClaudeLogo : CodexLogo, new Rectangle(14, 18, 40, 40));
         DrawPlanBadge(g);
 
-        // quota text
-        using (var font = new Font("Consolas", 13, FontStyle.Bold, GraphicsUnit.Pixel))
-        using (var fmt = new StringFormat { Alignment = StringAlignment.Center })
+        // Window, used percentage and reset countdown share each row, so the
+        // existing pet keeps its size and position.
+        using (var labelFont = new Font("Consolas", 11, FontStyle.Bold, GraphicsUnit.Pixel))
+        using (var valueFont = new Font("Consolas", 14, FontStyle.Bold, GraphicsUnit.Pixel))
+        using (var center = new StringFormat
         {
-            g.DrawString(Line1, font, Brushes.White, new RectangleF(0, 188, 240, 18), fmt);
-            g.DrawString(Line2, font, Brushes.White, new RectangleF(0, 206, 240, 18), fmt);
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+        })
+        using (var muted = new SolidBrush(Color.FromArgb(145, 145, 145)))
+        using (var panelBrush = new SolidBrush(Color.FromArgb(16, 16, 16)))
+        using (var panelPen = new Pen(Color.FromArgb(41, 52, 41)))
+        {
+            void Panel(RectangleF rect, float radius)
+            {
+                using var path = RoundedRect(rect, radius);
+                g.FillPath(panelBrush, path);
+                g.DrawPath(panelPen, path);
+            }
+
+            void Row(string label, double? pct, int? reset, float y)
+            {
+                g.DrawString(label, labelFont, muted, new RectangleF(20, y, 66, 22), center);
+                g.DrawString(pct.HasValue ? $"{Math.Clamp((int)pct.Value, 0, 100)}%" : "--",
+                    valueFont, Brushes.White, new RectangleF(87, y, 66, 22), center);
+                g.DrawString(ResetText(reset), labelFont, Brushes.Cyan,
+                    new RectangleF(154, y, 66, 22), center);
+            }
+            if (!FiveHourPct.HasValue && WeeklyPct.HasValue)
+            {
+                Panel(new RectangleF(20, 191, 200, 24), 7);
+                Row("WK", WeeklyPct, WeeklyResetMin, 192);
+            }
+            else
+            {
+                Panel(new RectangleF(20, 178, 200, 21), 6);
+                Row("5H", FiveHourPct, FiveHourResetMin, 178);
+                Panel(new RectangleF(20, 201, 200, 21), 6);
+                Row("WK", WeeklyPct, WeeklyResetMin, 201);
+            }
         }
 
         if (!DeviceOK)
@@ -312,10 +348,12 @@ sealed class MirrorControl : Control
         var provider = string.IsNullOrEmpty(Domestic.ActiveProvider)
             ? "QWEN" : Domestic.ActiveProvider.ToUpperInvariant();
         var isKimi = provider == "KIMI";
-        var plan = p.PlanPct.HasValue ? Math.Clamp((int)p.PlanPct.Value, 0, 100) : 0;
-        var planNumber = p.PlanPct.HasValue
-            ? (p.PlanPctText.Length > 0 ? p.PlanPctText
-                : ((int)Math.Clamp(p.PlanPct.Value, 0, 100)).ToString(CultureInfo.InvariantCulture))
+        var isWindowed = isKimi || p.FiveHourPct.HasValue || p.WeeklyPct.HasValue;
+        var displayPct = isWindowed ? p.WeeklyPct ?? p.PlanPct : p.PlanPct;
+        var plan = displayPct.HasValue ? Math.Clamp((int)displayPct.Value, 0, 100) : 0;
+        var planNumber = displayPct.HasValue
+            ? (!isWindowed && p.PlanPctText.Length > 0 ? p.PlanPctText
+                : ((int)Math.Clamp(displayPct.Value, 0, 100)).ToString(CultureInfo.InvariantCulture))
             : "--";
         var remaining = p.PlanPct.HasValue
             ? $"{(p.RemainingPctText.Length > 0 ? p.RemainingPctText
@@ -338,7 +376,7 @@ sealed class MirrorControl : Control
         using var percentFont = new Font("Consolas", percentSize, FontStyle.Bold, GraphicsUnit.Pixel);
         using var suffixFont = new Font("Consolas", percentSize <= 30 ? 14 : 22,
             FontStyle.Bold, GraphicsUnit.Pixel);
-        using var tokenFont = new Font("Consolas", 26, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var resetValueFont = new Font("Consolas", 13, FontStyle.Bold, GraphicsUnit.Pixel);
         using var greenBrush = new SolidBrush(Green);
         using var mutedBrush = new SolidBrush(mutedColor);
         using var numberBrush = new SolidBrush(numberColor);
@@ -378,7 +416,7 @@ sealed class MirrorControl : Control
         g.FillRectangle(mutedBrush, 20, 53, 200, 1);
         g.FillRectangle(greenBrush, 20, 53, 42, 1);
 
-        g.DrawString(isKimi ? "WEEKLY" : "PLAN", smallFont, mutedBrush,
+        g.DrawString(isWindowed ? "WEEKLY" : "PLAN", smallFont, mutedBrush,
                      new RectangleF(0, 69, 240, 16), centered);
         var numberSize = g.MeasureString(planNumber, percentFont);
         var suffixWidth = p.PlanPct.HasValue ? g.MeasureString("%", suffixFont).Width + 4 : 0;
@@ -389,23 +427,42 @@ sealed class MirrorControl : Control
             g.DrawString("%", suffixFont, greenBrush, numberLeft + numberSize.Width + 4,
                 numberTop + numberSize.Height - suffixFont.Height - 1);
 
-        g.DrawString("REMAINING", smallFont, mutedBrush, 37, 153);
+        g.DrawString(isWindowed ? "RESET" : "REMAINING", smallFont, mutedBrush, 37, 153);
         using (var right = new StringFormat(centered) { Alignment = StringAlignment.Far })
-            g.DrawString(remaining, labelFont, greenBrush, new RectangleF(95, 149, 108, 20), right);
+            g.DrawString(isWindowed ? ResetText(p.WeeklyResetMin) : remaining,
+                labelFont, greenBrush, new RectangleF(95, 149, 108, 20), right);
 
         using (var panel = RoundedRect(new RectangleF(20, 177, 200, 38), 8))
             g.FillPath(panelBrush, panel);
         using (var panel = RoundedRect(new RectangleF(20, 177, 200, 38), 8))
             g.DrawPath(panelPen, panel);
-        g.DrawString(isKimi ? "5H" : "TODAY", labelFont, greenBrush, 34, 182);
-        g.DrawString(isKimi ? "USAGE" : "TOKENS", smallFont, mutedBrush, 35, 200);
-        var panelValue = isKimi
+        var panelValue = isWindowed
             ? (p.FiveHourPct.HasValue
                 ? $"{(int)Math.Clamp(p.FiveHourPct.Value, 0, 100)}%" : "--")
-            : TokenText(p.TokensToday);
-        using (var right = new StringFormat(centered) { Alignment = StringAlignment.Far })
-            g.DrawString(panelValue, tokenFont, cyanBrush,
-                         new RectangleF(104, 179, 99, 32), right);
+            : PlanResetText(p.PlanResetAt, p.PlanResetMin);
+        if (isWindowed)
+        {
+            g.DrawString("5H", labelFont, greenBrush,
+                new RectangleF(20, 177, 66, 38), centered);
+            g.DrawString(panelValue, labelFont, Brushes.White,
+                new RectangleF(87, 177, 66, 38), centered);
+            g.DrawString(ResetText(p.FiveHourResetMin), labelFont, cyanBrush,
+                new RectangleF(154, 177, 66, 38), centered);
+        }
+        else
+        {
+            g.DrawString("RESET", labelFont, greenBrush,
+                new RectangleF(20, 177, 66, 38), centered);
+            g.DrawString(panelValue, resetValueFont, cyanBrush,
+                new RectangleF(87, 177, 133, 38), centered);
+        }
+    }
+
+    static string PlanResetText(long? epoch, int? minutes)
+    {
+        if (epoch.HasValue && epoch.Value > 0)
+            return DateTimeOffset.FromUnixTimeSeconds(epoch.Value).ToLocalTime().ToString("MM-dd HH:mm");
+        return ResetText(minutes);
     }
 
     void DrawDualScene(Graphics g)
@@ -435,7 +492,7 @@ sealed class MirrorControl : Control
             if (!string.IsNullOrWhiteSpace(plan))
             {
                 var color = PlanColor(plan);
-                var badgeWidth = Math.Clamp((int)Math.Ceiling(g.MeasureString(plan, smallFont).Width) + 10, 36, 78);
+                var badgeWidth = Math.Clamp((int)Math.Ceiling(g.MeasureString(plan, smallFont).Width) + 16, 40, 112);
                 var badge = new RectangleF(220 - badgeWidth, top, badgeWidth, 16);
                 using var badgePath = RoundedRect(badge, 4);
                 using var badgeFill = new SolidBrush(Color.FromArgb(35, color));
@@ -490,8 +547,8 @@ sealed class MirrorControl : Control
     {
         if (!minutes.HasValue || minutes.Value < 0) return "";
         var m = minutes.Value;
-        if (m >= 1440) return $"{m / 1440}d{m % 1440 / 60}h";
-        if (m >= 60) return $"{m / 60}h{m % 60}m";
+        if (m >= 1440) return $"{m / 1440}d {m % 1440 / 60}h";
+        if (m >= 60) return $"{m / 60}h {m % 60}m";
         return $"{m}m";
     }
 
@@ -547,15 +604,17 @@ sealed class MirrorControl : Control
     void DrawWeatherScene(Graphics g)
     {
         var w = Weather;
-        using var headerFont = new Font("Microsoft YaHei UI", 17, FontStyle.Bold, GraphicsUnit.Pixel);
+        var headerFontSize = w.City.Length + w.Condition.Length > 5 ? 15 : 17;
+        using var headerFont = new Font("Microsoft YaHei UI", headerFontSize, FontStyle.Bold, GraphicsUnit.Pixel);
         using var rangeFont = new Font("Consolas", 14, FontStyle.Bold, GraphicsUnit.Pixel);
         using var timeFont = new Font("Consolas", 48, FontStyle.Bold, GraphicsUnit.Pixel);
         using var secondFont = new Font("Consolas", 25, FontStyle.Regular, GraphicsUnit.Pixel);
         using var dateFont = new Font("Microsoft YaHei UI", 19, FontStyle.Bold, GraphicsUnit.Pixel);
         using var metricFont = new Font("Consolas", 24, FontStyle.Regular, GraphicsUnit.Pixel);
         g.DrawString($"{w.City} {w.Condition}", headerFont, Brushes.White, new RectangleF(14, 1, 130, 26));
-        g.DrawString($"L {(int)Math.Round(w.Low)}C", rangeFont, Brushes.Cyan, 20, 34);
-        g.DrawString($"H {(int)Math.Round(w.High)}C", rangeFont, Brushes.Orange, 81, 34);
+        var rangeY = headerFontSize < 17 ? 33 : 34;
+        g.DrawString($"L {(int)Math.Round(w.Low)}C", rangeFont, Brushes.Cyan, 20, rangeY);
+        g.DrawString($"H {(int)Math.Round(w.High)}C", rangeFont, Brushes.Orange, 81, rangeY);
         using (var badgeFont = new Font("Microsoft YaHei UI", w.AirQuality.Length > 1 ? 12 : 18, FontStyle.Bold, GraphicsUnit.Pixel))
         using (var badgeFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
             g.DrawString(w.AirQuality, badgeFont, Brushes.Gold, new RectangleF(136, 12, 42, 30), badgeFormat);
@@ -1030,16 +1089,20 @@ sealed class MirrorForm : Form
         {
             var pct = snap.Claude.FiveHourPct ?? 0;
             _mirror.RingPct = pct;
-            _mirror.Line1 = "5h " + PctText(pct);
-            _mirror.Line2 = "Weekly " + PctText(snap.Claude.SevenDayPct);
+            _mirror.FiveHourPct = snap.Claude.FiveHourPct;
+            _mirror.FiveHourResetMin = snap.Claude.FiveHourResetMin;
+            _mirror.WeeklyPct = snap.Claude.SevenDayPct;
+            _mirror.WeeklyResetMin = snap.Claude.SevenDayResetMin;
             _mirror.Plan = snap.Claude.Plan;
             _mirror.NeedsInput = snap.Claude.NeedsInput;
         }
         else
         {
             _mirror.RingPct = snap.Codex.PrimaryPct ?? snap.Codex.WeeklyPct ?? 0;
-            _mirror.Line1 = "5h " + PctText(snap.Codex.PrimaryPct);
-            _mirror.Line2 = "Weekly " + PctText(snap.Codex.WeeklyPct);
+            _mirror.FiveHourPct = snap.Codex.PrimaryPct;
+            _mirror.FiveHourResetMin = snap.Codex.PrimaryResetMin;
+            _mirror.WeeklyPct = snap.Codex.WeeklyPct;
+            _mirror.WeeklyResetMin = snap.Codex.WeeklyResetMin;
             _mirror.Plan = snap.Codex.Plan;
             _mirror.NeedsInput = snap.Codex.NeedsInput;
         }

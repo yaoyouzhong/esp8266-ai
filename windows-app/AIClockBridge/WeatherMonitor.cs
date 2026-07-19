@@ -54,6 +54,7 @@ sealed class WeatherMonitor
     byte[] _airBitmap = new byte[AirW * AirH * 2];
     int _dateCenterX = DateW / 2;
     int _headerCenterX = HeaderW / 2;
+    int _rangeY = 34;
     int _textRev;
     string _lastText = "";
     System.Threading.Timer _timer;
@@ -79,6 +80,7 @@ sealed class WeatherMonitor
     public byte[] AirBitmap { get { lock (_lock) return _airBitmap.ToArray(); } }
     public int DateCenterX { get { lock (_lock) return _dateCenterX; } }
     public int HeaderCenterX { get { lock (_lock) return _headerCenterX; } }
+    public int RangeY { get { lock (_lock) return _rangeY; } }
     public int TextRev { get { lock (_lock) return _textRev; } }
 
     public void Start()
@@ -128,6 +130,7 @@ sealed class WeatherMonitor
             updated_utc = value.UpdatedUtc, stale = value.Stale, text_rev = TextRev,
             date_center_x = DateCenterX,
             header_center_x = HeaderCenterX,
+            range_y = RangeY,
             animation = Animation,
             source = value.Source,
         });
@@ -319,11 +322,17 @@ sealed class WeatherMonitor
         using var headerBmp = new Bitmap(HeaderW, HeaderH);
         using var dateBmp = new Bitmap(DateW, DateH);
         using var airBmp = new Bitmap(AirW, AirH);
-        DrawChineseText(headerBmp, header, 10f, Color.White, centered: false);
+        // The PM badge begins at device x=136 while this bitmap starts at x=14,
+        // leaving 122 px for visible header text. Four-character locations such
+        // as "南京秦淮" need one smaller font step so the final weather glyph is
+        // not overwritten by the badge.
+        var headerFontSize = snapshot.City.Length + snapshot.Condition.Length > 5 ? 9f : 10f;
+        DrawChineseText(headerBmp, header, headerFontSize, Color.White, centered: false);
         DrawChineseText(dateBmp, date, 11f, Color.White, centered: false);
         DrawAirBadge(airBmp, snapshot.AirQuality);
         var dateCenterX = VisibleTextCenterX(dateBmp);
         var headerCenterX = VisibleTextCenterX(headerBmp);
+        var rangeY = Math.Clamp(34 + (VisibleTextBottomY(headerBmp) - 24) / 2, 32, 35);
         lock (_lock)
         {
             _lastText = key;
@@ -332,8 +341,21 @@ sealed class WeatherMonitor
             _airBitmap = Rgb565.Encode(airBmp);
             _dateCenterX = dateCenterX;
             _headerCenterX = headerCenterX;
+            _rangeY = rangeY;
             _textRev++;
         }
+    }
+
+    static int VisibleTextBottomY(Bitmap bitmap)
+    {
+        var bottom = -1;
+        for (var y = 0; y < bitmap.Height; y++)
+        for (var x = 0; x < bitmap.Width; x++)
+        {
+            var pixel = bitmap.GetPixel(x, y);
+            if (pixel.R != 0 || pixel.G != 0 || pixel.B != 0) bottom = Math.Max(bottom, y);
+        }
+        return bottom >= 0 ? bottom : 24;
     }
 
     static int VisibleTextCenterX(Bitmap bitmap)

@@ -27,7 +27,7 @@
 
 | | |
 |---|---|
-| <img src="docs/images/feature1.jpg" width="360" alt="AI 工作状态"> | **AI 工作状态与额度**<br>桌宠动起来 = AI 正在干活。Claude/Codex 显示供应商返回的真实额度和套餐会员徽标；国产模型页可在厂商子菜单中单选。阿里云百炼显示千问 Token Plan，并用金色徽标显示团队版等订阅版本；月之暗面显示 Kimi Coding Plan 的会员权益及 Weekly/5h。授权后与 Codex 一样在启动时立即读取、每 2 分钟自动刷新，并缓存供应商页面返回的准确值。未知额度显示 `--`，不做估算。 |
+| <img src="docs/images/feature1.jpg" width="360" alt="AI 工作状态"> | **AI 工作状态与额度**<br>桌宠动起来 = AI 正在干活。Claude/Codex 的 5H/WK 行同时显示真实用量和重置倒计时；国产模型页可在厂商子菜单中单选。阿里云百炼 Token Plan 显示总额度和固定重置时间，Coding Plan 有真实窗口时显示 5H/WK；月之暗面显示 Kimi Coding Plan 的会员权益、Weekly/5H 及各自重置时间。授权后每 2 分钟自动刷新，并缓存供应商页面返回的准确值。未知额度或窗口直接隐藏/显示 `--`，不做估算。 |
 | <img src="docs/images/feature2.jpg" width="360" alt="系统监控"> | **系统实时监控**<br>任务管理器风格的上下行曲线，56 秒滚动窗口，量程自动调整，并同步显示 Windows CPU 与内存占用。 |
 | <img src="docs/images/music.jpg" width="360" alt="音乐播放"> | **音乐播放显示**<br>专辑封面、歌名、歌手、进度条实时同步；音乐响起自动切入，停止自动切回。 |
 | | **天气时钟与股票行情**<br>天气页采用大号时分秒、城市/天气/空气质量、温度和湿度布局；Windows 可配置和风天气实况、手动区县或 Windows 自动定位，并在请求失败时回退 Open-Meteo。股票页最多显示 4 只 A股/港股/美股，按国内习惯涨红跌绿。两页均保留最近成功值并支持 USB 直推。 |

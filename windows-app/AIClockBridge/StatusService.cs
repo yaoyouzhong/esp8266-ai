@@ -50,7 +50,11 @@ class DomesticProviderStatus
     public string PlanPctText = "";
     public string RemainingPctText = "";
     public double? FiveHourPct = null;
+    public int? FiveHourResetMin = null;
     public double? WeeklyPct = null;
+    public int? WeeklyResetMin = null;
+    public long? PlanResetAt = null;
+    public int? PlanResetMin = null;
     public double LastActivityEpoch;
 }
 
@@ -137,6 +141,11 @@ class StatusSnapshot
         if (v.HasValue) w.WriteNumber(name, v.Value); else w.WriteNull(name);
     }
 
+    static void WriteNullable(Utf8JsonWriter w, string name, long? v)
+    {
+        if (v.HasValue) w.WriteNumber(name, v.Value); else w.WriteNull(name);
+    }
+
     static void WriteDomesticProvider(Utf8JsonWriter w, string name, DomesticProviderStatus p)
     {
         w.WriteStartObject(name);
@@ -147,7 +156,11 @@ class StatusSnapshot
         w.WriteString("plan_pct_text", p.PlanPctText);
         w.WriteString("remaining_pct_text", p.RemainingPctText);
         WriteNullable(w, "five_hour_pct", p.FiveHourPct);
+        WriteNullable(w, "five_hour_reset_min", p.FiveHourResetMin);
         WriteNullable(w, "weekly_pct", p.WeeklyPct);
+        WriteNullable(w, "weekly_reset_min", p.WeeklyResetMin);
+        WriteNullable(w, "plan_reset_at", p.PlanResetAt);
+        WriteNullable(w, "plan_reset_min", p.PlanResetMin);
         w.WriteEndObject();
     }
 
@@ -374,6 +387,7 @@ sealed class StatusService
 
     static string QwenMembershipLabel(string membership)
     {
+        if (membership.Contains("coding", StringComparison.OrdinalIgnoreCase)) return "CODING PLAN";
         if (membership.Contains("团队", StringComparison.OrdinalIgnoreCase)
             || membership.Contains("team", StringComparison.OrdinalIgnoreCase)) return "TEAM";
         if (membership.Contains("企业", StringComparison.OrdinalIgnoreCase)
@@ -388,6 +402,16 @@ sealed class StatusService
         if (membership.Contains("基础", StringComparison.OrdinalIgnoreCase)
             || membership.Contains("basic", StringComparison.OrdinalIgnoreCase)) return "BASIC";
         return "TOKEN PLAN";
+    }
+
+    static int? ResetMinutes(DateTimeOffset? resetAt)
+    {
+        if (!resetAt.HasValue) return null;
+        var minutes = (resetAt.Value - DateTimeOffset.Now).TotalMinutes;
+        // Keep the reset column visible while a just-expired vendor window is
+        // waiting for the next background refresh. Returning null made the
+        // Kimi 5H reset text disappear briefly at the rollover boundary.
+        return Math.Max(0, (int)Math.Ceiling(minutes));
     }
 
     bool SetCodexCompletion(double completionAt)
@@ -472,10 +496,18 @@ sealed class StatusService
             {
                 var du = DomesticUsage.Snapshot;
                 snap.Domestic.Qwen.PlanPct = du.QwenPlanPct;
+                snap.Domestic.Qwen.WeeklyPct = du.QwenWeeklyPct;
+                snap.Domestic.Qwen.FiveHourPct = du.QwenFiveHourPct;
+                snap.Domestic.Qwen.WeeklyResetMin = ResetMinutes(du.QwenWeeklyResetAt);
+                snap.Domestic.Qwen.FiveHourResetMin = ResetMinutes(du.QwenFiveHourResetAt);
+                snap.Domestic.Qwen.PlanResetAt = du.QwenPlanResetAt?.ToUnixTimeSeconds();
+                snap.Domestic.Qwen.PlanResetMin = ResetMinutes(du.QwenPlanResetAt);
                 snap.Domestic.Xiaomi.PlanPct = du.XiaomiPlanPct;
                 snap.Domestic.Kimi.PlanPct = du.KimiWeeklyPct;
                 snap.Domestic.Kimi.WeeklyPct = du.KimiWeeklyPct;
                 snap.Domestic.Kimi.FiveHourPct = du.KimiFiveHourPct;
+                snap.Domestic.Kimi.WeeklyResetMin = ResetMinutes(du.KimiWeeklyResetAt);
+                snap.Domestic.Kimi.FiveHourResetMin = ResetMinutes(du.KimiFiveHourResetAt);
                 if (!string.IsNullOrWhiteSpace(du.QwenMembership))
                 {
                     snap.Domestic.Qwen.Model = QwenMembershipLabel(du.QwenMembership);

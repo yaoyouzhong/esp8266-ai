@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -35,9 +36,16 @@ static class DomesticProviderCatalog
 sealed class DomesticQuotaSnapshot
 {
     public double? QwenPlanPct;
+    public double? QwenWeeklyPct;
+    public double? QwenFiveHourPct;
     public double? XiaomiPlanPct;
     public double? KimiWeeklyPct;
     public double? KimiFiveHourPct;
+    public DateTimeOffset? QwenPlanResetAt;
+    public DateTimeOffset? QwenWeeklyResetAt;
+    public DateTimeOffset? QwenFiveHourResetAt;
+    public DateTimeOffset? KimiWeeklyResetAt;
+    public DateTimeOffset? KimiFiveHourResetAt;
     public string QwenMembership = "";
     public string KimiMembership = "";
     public DateTime? QwenFetchedAt;
@@ -68,9 +76,16 @@ sealed class DomesticQuotaService
             lock (_lock) return new DomesticQuotaSnapshot
             {
                 QwenPlanPct = _snapshot.QwenPlanPct,
+                QwenWeeklyPct = _snapshot.QwenWeeklyPct,
+                QwenFiveHourPct = _snapshot.QwenFiveHourPct,
                 XiaomiPlanPct = _snapshot.XiaomiPlanPct,
                 KimiWeeklyPct = _snapshot.KimiWeeklyPct,
                 KimiFiveHourPct = _snapshot.KimiFiveHourPct,
+                QwenPlanResetAt = _snapshot.QwenPlanResetAt,
+                QwenWeeklyResetAt = _snapshot.QwenWeeklyResetAt,
+                QwenFiveHourResetAt = _snapshot.QwenFiveHourResetAt,
+                KimiWeeklyResetAt = _snapshot.KimiWeeklyResetAt,
+                KimiFiveHourResetAt = _snapshot.KimiFiveHourResetAt,
                 QwenMembership = _snapshot.QwenMembership,
                 KimiMembership = _snapshot.KimiMembership,
                 QwenFetchedAt = _snapshot.QwenFetchedAt,
@@ -112,14 +127,32 @@ sealed class DomesticQuotaService
         }
     }
 
-    internal void SetQwen(double pct, string membership = null)
+    internal void SetQwen(double pct, string membership = null, DateTimeOffset? resetAt = null)
     {
         lock (_lock)
         {
             _snapshot.QwenPlanPct = Clamp(pct);
             if (!string.IsNullOrWhiteSpace(membership))
                 _snapshot.QwenMembership = membership.Trim();
+            if (resetAt.HasValue) _snapshot.QwenPlanResetAt = resetAt;
             _snapshot.QwenFetchedAt = DateTime.UtcNow;
+            Save();
+        }
+    }
+
+    internal void SetQwenPageMetadata(string resetText, string membership)
+    {
+        lock (_lock)
+        {
+            if (!string.IsNullOrWhiteSpace(membership))
+            {
+                var incoming = membership.Trim();
+                var genericTokenPlan = incoming.Equals("Token Plan", StringComparison.OrdinalIgnoreCase);
+                if (!genericTokenPlan || string.IsNullOrWhiteSpace(_snapshot.QwenMembership))
+                    _snapshot.QwenMembership = incoming;
+            }
+            if (ParseResetAt(resetText) is DateTimeOffset resetAt)
+                _snapshot.QwenPlanResetAt = resetAt;
             Save();
         }
     }
@@ -154,6 +187,61 @@ sealed class DomesticQuotaService
             Settings.Set("kimi_membership", _snapshot.KimiMembership);
             Save();
         }
+    }
+
+    internal void SetKimiPageMetadata(string membership, string weeklyResetText,
+        string fiveHourResetText)
+    {
+        lock (_lock)
+        {
+            if (!string.IsNullOrWhiteSpace(membership)
+                && !membership.StartsWith("LEVEL_", StringComparison.OrdinalIgnoreCase))
+            {
+                _snapshot.KimiMembership = membership.Trim();
+                Settings.Set("kimi_membership", _snapshot.KimiMembership);
+            }
+            if (ParseResetAt(weeklyResetText) is DateTimeOffset weeklyResetAt)
+                _snapshot.KimiWeeklyResetAt = weeklyResetAt;
+            if (ParseResetAt(fiveHourResetText) is DateTimeOffset fiveHourResetAt)
+                _snapshot.KimiFiveHourResetAt = fiveHourResetAt;
+            Save();
+        }
+    }
+
+    internal static DateTimeOffset? ParseResetAt(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        text = text.Trim();
+        if (DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture,
+                DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.AssumeLocal, out var parsedOffset))
+            return parsedOffset;
+        foreach (var format in new[]
+                 {
+                     "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy/MM/dd HH:mm:ss",
+                     "yyyy.MM.dd HH:mm:ss", "yyyy.MM.dd HH:mm"
+                 })
+        {
+            if (!DateTime.TryParseExact(text, format, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AllowWhiteSpaces, out var local)) continue;
+            local = DateTime.SpecifyKind(local, DateTimeKind.Unspecified);
+            return new DateTimeOffset(local, TimeZoneInfo.Local.GetUtcOffset(local));
+        }
+
+        double minutes = 0;
+        var matched = false;
+        foreach (Match match in Regex.Matches(text,
+                     @"(?<value>\d+(?:\.\d+)?)\s*(?<unit>天|小时|时|分钟|分|days?|hours?|hrs?|minutes?|mins?)",
+                     RegexOptions.IgnoreCase))
+        {
+            if (!double.TryParse(match.Groups["value"].Value, NumberStyles.Float,
+                    CultureInfo.InvariantCulture, out var value)) continue;
+            var unit = match.Groups["unit"].Value.ToLowerInvariant();
+            minutes += unit.StartsWith("天") || unit.StartsWith("day") ? value * 1440
+                : unit.StartsWith("小时") || unit == "时" || unit.StartsWith("hour") || unit.StartsWith("hr")
+                    ? value * 60 : value;
+            matched = true;
+        }
+        return matched && minutes > 0 ? DateTimeOffset.Now.AddMinutes(minutes) : null;
     }
 
     static double Clamp(double value) => Math.Clamp(value, 0, 100);
@@ -415,7 +503,9 @@ sealed class DomesticQuotaAuthForm : Form
                 if (e.IsSuccess && _activeProvider?.Id is "qwen" or "kimi")
                     await PersistLoginCookies(_activeProvider.Url);
                 if (e.IsSuccess && _activeProvider?.Id == "kimi")
-                    _ = CaptureKimiMembershipFromPage(_navigationGeneration);
+                    _ = CaptureKimiPageMetadata(_navigationGeneration);
+                if (e.IsSuccess && _activeProvider?.Id == "qwen")
+                    _ = CaptureQwenPageMetadata(_navigationGeneration);
             };
         }
         _status.Text = provider.CaptureSupported
@@ -425,7 +515,7 @@ sealed class DomesticQuotaAuthForm : Form
         if (provider.CaptureSupported) _ = ShowPendingStatus(provider, generation);
     }
 
-    async Task CaptureKimiMembershipFromPage(int generation)
+    async Task CaptureKimiPageMetadata(int generation)
     {
         const string script = """
             (() => {
@@ -436,27 +526,106 @@ sealed class DomesticQuotaAuthForm : Form
                 return text === '我的权益' || text === 'My Benefits';
               });
               const value = card ? card.querySelector('.stats-card-value') : null;
-              return value ? value.textContent.trim() : '';
+              const entries = Array.from(document.querySelectorAll(
+                  '.stats-card-reset-time, .combined-card-reset-time'))
+                .map(item => ({
+                  text: item.textContent.trim(),
+                  context: (item.closest('.combined-card-quota, .stats-card') || item.parentElement)
+                    ?.innerText || ''
+                })).filter(item => item.text);
+              const unique = entries.filter((item, index) =>
+                entries.findIndex(other => other.text === item.text) === index);
+              const weekly = unique.find(item => /本周用量|weekly\s+usage/i.test(item.context));
+              const fiveHour = unique.find(item => /频限明细|rate\s+limit/i.test(item.context));
+              return {
+                membership: value ? value.textContent.trim() : '',
+                weeklyResetText: weekly?.text || '',
+                fiveHourResetText: fiveHour?.text || ''
+              };
             })()
             """;
-        for (var attempt = 0; attempt < 20; attempt++)
+        var quotaResponseSeen = false;
+        var previousWeeklyReset = "";
+        var previousFiveHourReset = "";
+        var stableReadCount = 0;
+        for (var attempt = 0; attempt < 40; attempt++)
         {
             if (IsDisposed || generation != _navigationGeneration || _activeProvider?.Id != "kimi"
                 || _web.CoreWebView2 == null) return;
+            if (!_capturedForNavigation)
+            {
+                await Task.Delay(500);
+                continue;
+            }
+            if (!quotaResponseSeen)
+            {
+                quotaResponseSeen = true;
+                await Task.Delay(1000); // Let Vue replace the initial full-window reset placeholder.
+            }
             try
             {
                 var result = await _web.CoreWebView2.ExecuteScriptAsync(script);
-                var membership = JsonSerializer.Deserialize<string>(result)?.Trim() ?? "";
-                if (membership.Length is > 0 and <= 32
-                    && !membership.StartsWith("LEVEL_", StringComparison.OrdinalIgnoreCase))
+                using var doc = JsonDocument.Parse(result);
+                var root = doc.RootElement;
+                var membership = root.TryGetProperty("membership", out var membershipValue)
+                    ? membershipValue.GetString()?.Trim() ?? "" : "";
+                var weeklyReset = root.TryGetProperty("weeklyResetText", out var weeklyValue)
+                    ? weeklyValue.GetString()?.Trim() ?? "" : "";
+                var fiveHourReset = root.TryGetProperty("fiveHourResetText", out var fiveHourValue)
+                    ? fiveHourValue.GetString()?.Trim() ?? "" : "";
+                if (weeklyReset.Length > 0 && fiveHourReset.Length > 0)
                 {
-                    _service.SetKimiMembership(membership);
-                    return;
+                    stableReadCount = weeklyReset == previousWeeklyReset
+                        && fiveHourReset == previousFiveHourReset ? stableReadCount + 1 : 1;
+                    previousWeeklyReset = weeklyReset;
+                    previousFiveHourReset = fiveHourReset;
+                    if (stableReadCount >= 2)
+                    {
+                        _service.SetKimiPageMetadata(membership, weeklyReset, fiveHourReset);
+                        return;
+                    }
                 }
             }
             catch
             {
                 // The Vue page may still be replacing its initial DOM; retry below.
+            }
+            await Task.Delay(500);
+        }
+    }
+
+    async Task CaptureQwenPageMetadata(int generation)
+    {
+        const string script = """
+            (() => {
+              const text = document.body ? document.body.innerText : '';
+              const reset = text.match(/重置时间\s*([0-9]{4}[-\/.]\d{1,2}[-\/.]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?)/);
+              let membership = '';
+              if (/Coding\s*Plan/i.test(text)) membership = 'Coding Plan';
+              else if (/Token\s*Plan/i.test(text) && /团队版/i.test(text)) membership = 'Token Plan 团队版';
+              else if (/Token\s*Plan/i.test(text)) membership = 'Token Plan';
+              return { resetText: reset ? reset[1] : '', membership };
+            })()
+            """;
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            if (IsDisposed || generation != _navigationGeneration || _activeProvider?.Id != "qwen"
+                || _web.CoreWebView2 == null) return;
+            try
+            {
+                var result = await _web.CoreWebView2.ExecuteScriptAsync(script);
+                using var doc = JsonDocument.Parse(result);
+                var root = doc.RootElement;
+                var reset = root.TryGetProperty("resetText", out var resetValue)
+                    ? resetValue.GetString()?.Trim() ?? "" : "";
+                var membership = root.TryGetProperty("membership", out var membershipValue)
+                    ? membershipValue.GetString()?.Trim() ?? "" : "";
+                _service.SetQwenPageMetadata(reset, membership);
+                if (reset.Length > 0) return;
+            }
+            catch
+            {
+                // The console shell renders before the subscription card; retry below.
             }
             await Task.Delay(500);
         }
@@ -573,10 +742,14 @@ sealed class DomesticQuotaAuthForm : Form
             {
                 if (responseInfo.ProviderId == "qwen")
                     membership = DomesticQuotaService.QwenSubscriptionName;
-                var pct = FindUsage(doc.RootElement, responseInfo.ProviderId == "qwen");
+                var isQwen = responseInfo.ProviderId == "qwen";
+                var qwen = isQwen
+                    ? FindQwenUsage(doc.RootElement) : null;
+                var pct = qwen?.Pct ?? FindUsage(doc.RootElement, isQwen);
                 if (!pct.HasValue) return;
                 weeklyPct = pct.Value;
-                if (responseInfo.ProviderId == "qwen") _service.SetQwen(pct.Value, membership);
+                if (responseInfo.ProviderId == "qwen")
+                    _service.SetQwen(pct.Value, membership, qwen?.ResetAt);
                 else _service.SetXiaomi(pct.Value);
             }
             var responseProvider = ProviderById(responseInfo.ProviderId);
@@ -625,6 +798,54 @@ sealed class DomesticQuotaAuthForm : Form
     }
 
     readonly record struct KimiUsage(double WeeklyPct, double? FiveHourPct);
+    readonly record struct QwenUsage(double Pct, DateTimeOffset? ResetAt);
+
+    static QwenUsage? FindQwenUsage(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var values = element.EnumerateObject().ToDictionary(p => p.Name, p => p.Value,
+                StringComparer.OrdinalIgnoreCase);
+            if (Number(values, "TotalValue") is double total && total > 0
+                && (Number(values, "TotalSurplusValue") ?? Number(values, "SurplusValue")) is double remain)
+            {
+                DateTimeOffset? resetAt = null;
+                foreach (var name in new[]
+                         {
+                             "ResetTime", "NextResetTime", "ResetAt", "NextResetAt",
+                             "EndTime", "ExpireTime", "ExpirationTime", "ValidTo", "CycleEndTime"
+                         })
+                {
+                    if (!values.TryGetValue(name, out var value)) continue;
+                    resetAt = DateTimeValue(value);
+                    if (resetAt.HasValue) break;
+                }
+                return new QwenUsage(100.0 * Math.Max(0, total - remain) / total, resetAt);
+            }
+            foreach (var child in values.Values)
+                if (FindQwenUsage(child) is QwenUsage found) return found;
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in element.EnumerateArray())
+                if (FindQwenUsage(child) is QwenUsage found) return found;
+        }
+        return null;
+    }
+
+    static DateTimeOffset? DateTimeValue(JsonElement value)
+    {
+        if (value.ValueKind == JsonValueKind.String)
+            return DomesticQuotaService.ParseResetAt(value.GetString());
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out var epoch)) return null;
+        try
+        {
+            if (epoch > 10_000_000_000) return DateTimeOffset.FromUnixTimeMilliseconds(epoch);
+            if (epoch > 1_000_000_000) return DateTimeOffset.FromUnixTimeSeconds(epoch);
+        }
+        catch (ArgumentOutOfRangeException) { }
+        return null;
+    }
 
     static string FindKimiMembership(JsonElement element)
     {

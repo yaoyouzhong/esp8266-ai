@@ -207,7 +207,7 @@ const int WEATHER_ICON_X = 202, WEATHER_ICON_Y = 27;
 const int WEATHER_ANIM_BOTTOM = 224;
 struct WeatherStatus {
   float temp = 0, high = 0, low = 0, pm25 = -1;
-  int humidity = 0, icon = -1, animation = 0, utcOffsetS = 0, textRev = -1, dateCenterX = WEATHER_DATE_W / 2, headerCenterX = WEATHER_HEADER_W / 2;
+  int humidity = 0, icon = -1, animation = 0, utcOffsetS = 0, textRev = -1, dateCenterX = WEATHER_DATE_W / 2, headerCenterX = WEATHER_HEADER_W / 2, rangeY = 34;
   uint32_t epochUtc = 0;
   bool stale = false, loaded = false;
 };
@@ -274,7 +274,11 @@ struct DomesticProviderStatus {
   String planPctText;
   String remainingPctText;
   float fiveHourPct = -1;
+  int fiveHourResetMin = -1;
   float weeklyPct = -1;
+  int weeklyResetMin = -1;
+  uint32_t planResetAt = 0;
+  int planResetMin = -1;
 };
 
 struct DomesticStatus {
@@ -512,10 +516,8 @@ void drawSquareRing(float pct, uint16_t color) {
   int side = x1 - x0;
   float perimeter = side * 4.0;
 
-  // Unfilled track is drawn black (not grey) so it blends into the background
-  // and only the active quota portion is visible - still needs to be actively
-  // repainted each time though, to erase a previously longer fill if the
-  // percentage drops (e.g. a quota window reset).
+  // Unfilled track is drawn black so only the active quota portion is visible.
+  // It still needs repainting to erase a previously longer fill after reset.
   tft.fillRect(x0, y0, side, RING_THICKNESS, TFT_BLACK);                  // top
   tft.fillRect(x1 - RING_THICKNESS, y0, RING_THICKNESS, side, TFT_BLACK); // right
   tft.fillRect(x0, y1 - RING_THICKNESS, side, RING_THICKNESS, TFT_BLACK); // bottom
@@ -558,12 +560,13 @@ String pctText(float pct) {
   return pct >= 0 ? String((int)pct) + "%" : "-";
 }
 
-// Quota readout below the sprite: two columns ("5h" / "Wk"), small grey label
-// over a big font-4 percentage. Values repaint only when their text changes
-// (force = after a full-screen clear), so the 5s poll never flashes them.
-const int QUOTA_LABEL_Y = 183, QUOTA_VALUE_Y = 199;
-const int QUOTA_COL1_X = 70, QUOTA_COL2_X = 170;
-String lastQuota5h, lastQuotaWk;
+// One compact row per quota window: label, used percentage and reset time.
+// It reuses the old 48px footer, so the pet keeps its original dimensions.
+String lastQuota5hPct, lastQuota5hReset, lastQuotaWkPct, lastQuotaWkReset;
+bool lastQuotaSingle = false;
+String quotaResetText(int minutes);
+const uint16_t QUOTA_PANEL_COLOR = 0x1082;
+const uint16_t QUOTA_PANEL_BORDER = 0x29A5;
 
 // Faux-bold: the packed TFT_eSPI fonts have no bold face, so draw twice with
 // a 1px x offset. Transparent draws - the caller must have cleared the region.
@@ -573,22 +576,50 @@ void drawBoldString(const String &s, int x, int y, int font, uint16_t color) {
   tft.drawString(s, x + 1, y, font);
 }
 
-void drawQuotaText(float hourPct, float weekPct, bool force) {
-  tft.setTextDatum(TC_DATUM);
+void drawQuotaRow(const char *label, float pct, int resetMin, int y, bool force,
+                  String &lastPct, String &lastReset) {
+  String value = pctText(pct);
+  String reset = quotaResetText(resetMin);
   if (force) {
-    drawBoldString("5h", QUOTA_COL1_X, QUOTA_LABEL_Y, 2, TFT_LIGHTGREY);
-    drawBoldString("Wk", QUOTA_COL2_X, QUOTA_LABEL_Y, 2, TFT_LIGHTGREY);
+    tft.setTextDatum(MC_DATUM);
+    drawBoldString(label, 53, y + 11, 2, 0x9492);
   }
-  String v1 = pctText(hourPct), v2 = pctText(weekPct);
-  if (force || v1 != lastQuota5h) {
-    lastQuota5h = v1;
-    tft.fillRect(QUOTA_COL1_X - 50, QUOTA_VALUE_Y, 100, 26, TFT_BLACK);
-    drawBoldString(v1, QUOTA_COL1_X, QUOTA_VALUE_Y, 4, TFT_WHITE);
+  if (force || value != lastPct) {
+    lastPct = value;
+    tft.fillRect(87, y + 1, 66, 19, QUOTA_PANEL_COLOR);
+    tft.setTextDatum(MC_DATUM);
+    drawBoldString(value, 120, y + 11, 2, TFT_WHITE);
   }
-  if (force || v2 != lastQuotaWk) {
-    lastQuotaWk = v2;
-    tft.fillRect(QUOTA_COL2_X - 50, QUOTA_VALUE_Y, 100, 26, TFT_BLACK);
-    drawBoldString(v2, QUOTA_COL2_X, QUOTA_VALUE_Y, 4, TFT_WHITE);
+  if (force || reset != lastReset) {
+    lastReset = reset;
+    tft.fillRect(154, y + 1, 63, 19, QUOTA_PANEL_COLOR);
+    tft.setTextDatum(MC_DATUM);
+    drawBoldString(reset, 187, y + 11, 2, TFT_CYAN);
+  }
+}
+
+void drawQuotaText(float hourPct, int hourResetMin, float weekPct, int weekResetMin, bool force) {
+  bool single = hourPct < 0 && weekPct >= 0;
+  if (single != lastQuotaSingle) force = true;
+  if (force) {
+    tft.fillRect(18, 177, 204, 47, TFT_BLACK);
+    if (single) {
+      tft.fillRoundRect(20, 191, 200, 24, 7, QUOTA_PANEL_COLOR);
+      tft.drawRoundRect(20, 191, 200, 24, 7, QUOTA_PANEL_BORDER);
+    } else {
+      tft.fillRoundRect(20, 178, 200, 21, 6, QUOTA_PANEL_COLOR);
+      tft.drawRoundRect(20, 178, 200, 21, 6, QUOTA_PANEL_BORDER);
+      tft.fillRoundRect(20, 201, 200, 21, 6, QUOTA_PANEL_COLOR);
+      tft.drawRoundRect(20, 201, 200, 21, 6, QUOTA_PANEL_BORDER);
+    }
+    lastQuota5hPct = lastQuota5hReset = lastQuotaWkPct = lastQuotaWkReset = "";
+  }
+  lastQuotaSingle = single;
+  if (single) {
+    drawQuotaRow("WK", weekPct, weekResetMin, 192, force, lastQuotaWkPct, lastQuotaWkReset);
+  } else {
+    drawQuotaRow("5H", hourPct, hourResetMin, 178, force, lastQuota5hPct, lastQuota5hReset);
+    drawQuotaRow("WK", weekPct, weekResetMin, 201, force, lastQuotaWkPct, lastQuotaWkReset);
   }
 }
 
@@ -699,8 +730,8 @@ String dualLastClaudeKey, dualLastCodexKey;
 
 String quotaResetText(int minutes) {
   if (minutes < 0) return "";
-  if (minutes >= 1440) return String(minutes / 1440) + "d" + String((minutes % 1440) / 60) + "h";
-  if (minutes >= 60) return String(minutes / 60) + "h" + String(minutes % 60) + "m";
+  if (minutes >= 1440) return String(minutes / 1440) + "d " + String((minutes % 1440) / 60) + "h";
+  if (minutes >= 60) return String(minutes / 60) + "h " + String(minutes % 60) + "m";
   return String(minutes) + "m";
 }
 
@@ -722,13 +753,15 @@ void drawDualPlanBadge(const String &plan, int top) {
   if (plan.length() == 0) return;
   uint16_t color = dualPlanColor(plan);
   tft.setTextFont(2);
-  int width = constrain(tft.textWidth(plan) + 10, 36, 82);
+  int width = constrain(tft.textWidth(plan) + 16, 40, 112);
   int left = 220 - width;
   tft.fillRoundRect(left, top, width, 17, 4, TFT_BLACK);
-  tft.drawRoundRect(left, top, width, 17, 4, color);
   tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(color, TFT_BLACK);
+  tft.setTextColor(color);
   tft.drawString(plan, left + width / 2, top + 8, 2);
+  // Draw the outline last. An opaque font background used to erase the top
+  // and bottom edges, leaving only two parenthesis-like side arcs.
+  tft.drawRoundRect(left, top, width, 17, 4, color);
 }
 
 void drawDualRow(const char *label, float pct, int resetMin, int y) {
@@ -845,11 +878,13 @@ void drawActiveApp() {
   if (currentApp == APP_CLAUDE) {
     drawSquareRing(claudeRingPct(), currentStatusColor());
     if (showingCd == CD_NONE) drawClaudeSprite(claudeFrame);
-    drawQuotaText(claudeRingPct(), claudeStatus.sevenDayPct, true);
+    drawQuotaText(claudeStatus.fiveHourPct, claudeStatus.fiveHourResetMin,
+                  claudeStatus.sevenDayPct, claudeStatus.sevenDayResetMin, true);
   } else {
     drawSquareRing(codexRingPct(), currentStatusColor());
     if (showingCd == CD_NONE) drawCodexSprite(codexFrame);
-    drawQuotaText(codexStatus.primaryPct, codexStatus.weeklyPct, true);
+    drawQuotaText(codexStatus.primaryPct, codexStatus.primaryResetMin,
+                  codexStatus.weeklyPct, codexStatus.weeklyResetMin, true);
   }
   if (showingCd != CD_NONE) drawCountdown(true);
   drawAppLogo();
@@ -865,10 +900,12 @@ void refreshActiveApp() {
   }
   if (currentApp == APP_CLAUDE) {
     drawSquareRing(claudeRingPct(), currentStatusColor());
-    drawQuotaText(claudeRingPct(), claudeStatus.sevenDayPct, false);
+    drawQuotaText(claudeStatus.fiveHourPct, claudeStatus.fiveHourResetMin,
+                  claudeStatus.sevenDayPct, claudeStatus.sevenDayResetMin, false);
   } else {
     drawSquareRing(codexRingPct(), currentStatusColor());
-    drawQuotaText(codexStatus.primaryPct, codexStatus.weeklyPct, false);
+    drawQuotaText(codexStatus.primaryPct, codexStatus.primaryResetMin,
+                  codexStatus.weeklyPct, codexStatus.weeklyResetMin, false);
   }
   if (showingCd != CD_NONE) {
     syncCountdownDeadline();
@@ -1165,6 +1202,20 @@ String pctOrDash(float pct) {
   return pct >= 0 ? String((int)pct) + "%" : "--";
 }
 
+void epochToLocal(uint32_t utc, int offset, int &year, int &month, int &day,
+                  int &hour, int &minute, int &second, int &weekday);
+
+String domesticPlanResetText(uint32_t resetAt, int resetMin) {
+  if (resetAt > 0) {
+    int year, month, day, hour, minute, second, weekday;
+    epochToLocal(resetAt, bridgeUtcOffsetS, year, month, day, hour, minute, second, weekday);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%02d-%02d %02d:%02d", month, day, hour, minute);
+    return String(buf);
+  }
+  return quotaResetText(resetMin);
+}
+
 String fitDomesticText(String text, int maxWidth, int font) {
   while (text.length() > 0 && tft.textWidth(text, font) > maxWidth) {
     text.remove(text.length() - 1);
@@ -1176,8 +1227,10 @@ struct DomesticDrawCache {
   String provider;
   String model;
   String tokens;
+  String reset;
   String plan;
   String remaining;
+  bool windowed = false;
   bool initialized = false;
 };
 
@@ -1188,17 +1241,21 @@ void drawDomesticScreen(bool force = false) {
   String provider = domesticStatus.activeProvider.length() ? domesticStatus.activeProvider : "qwen";
   provider.toUpperCase();
   bool isKimi = provider == "KIMI";
+  bool isWindowed = isKimi || p.fiveHourPct >= 0 || p.weeklyPct >= 0;
   String model = p.model.length() ? fitDomesticText(p.model, 112, 2) : "--";
-  String tokens = isKimi
+  float displayPct = isWindowed && p.weeklyPct >= 0 ? p.weeklyPct : p.planPct;
+  String tokens = isWindowed
       ? (p.fiveHourPct >= 0 ? String((int)p.fiveHourPct) + "%" : "--")
-      : formatTokens(p.tokensToday);
-  String planNumber = p.planPct >= 0
-      ? (p.planPctText.length() ? p.planPctText : String((int)p.planPct)) : "--";
-  String plan = p.planPct >= 0 ? planNumber + "%" : "--";
-  String remaining = p.planPct >= 0
-      ? (p.remainingPctText.length() ? p.remainingPctText
-          : String(floorf(max(0.0f, 100.0f - p.planPct) * 100.0f) / 100.0f, 2))
-          + "% LEFT" : "QUOTA UNKNOWN";
+      : domesticPlanResetText(p.planResetAt, p.planResetMin);
+  String reset = isWindowed ? quotaResetText(p.fiveHourResetMin) : "";
+  String planNumber = displayPct >= 0
+      ? (!isWindowed && p.planPctText.length() ? p.planPctText : String((int)displayPct)) : "--";
+  String plan = displayPct >= 0 ? planNumber + "%" : "--";
+  String remaining = isWindowed ? quotaResetText(p.weeklyResetMin)
+      : p.planPct >= 0
+          ? (p.remainingPctText.length() ? p.remainingPctText
+              : String(floorf(max(0.0f, 100.0f - p.planPct) * 100.0f) / 100.0f, 2)) + "% LEFT"
+          : "QUOTA UNKNOWN";
   const uint16_t panelColor = 0x1082;
   const uint16_t mutedColor = 0x7BEF;
   const uint16_t numberColor = 0xFFDF;
@@ -1214,21 +1271,25 @@ void drawDomesticScreen(bool force = false) {
     tft.drawRoundRect(20, 177, 200, 38, 8, 0x29A5);
     tft.setTextDatum(TL_DATUM);
   }
-  drawSquareRing(max(p.planPct, 0.0f), TFT_GREEN);
-  if (force || !domesticDrawCache.initialized || provider != domesticDrawCache.provider) {
+  drawSquareRing(max(displayPct, 0.0f), TFT_GREEN);
+  if (force || !domesticDrawCache.initialized || provider != domesticDrawCache.provider
+      || isWindowed != domesticDrawCache.windowed) {
     tft.fillRect(34, 20, 72, 22, TFT_BLACK);
     tft.setTextDatum(TL_DATUM);
     drawBoldString(provider, 36, 24, 2, TFT_GREEN);
-    tft.fillRect(0, 69, SCREEN_W, 16, TFT_BLACK);
+    const int contentLeft = RING_MARGIN + RING_THICKNESS;
+    tft.fillRect(contentLeft, 69, SCREEN_W - contentLeft * 2, 16, TFT_BLACK);
     tft.setTextDatum(TC_DATUM);
     tft.setTextColor(mutedColor, TFT_BLACK);
-    tft.drawString(isKimi ? "WEEKLY" : "PLAN", SCREEN_CX, 73, 1);
+    tft.drawString(isWindowed ? "WEEKLY" : "PLAN", SCREEN_CX, 73, 1);
     tft.fillRect(28, 181, 76, 31, panelColor);
-    tft.setTextDatum(TL_DATUM);
-    tft.setTextColor(TFT_GREEN, panelColor);
-    tft.drawString(isKimi ? "5H" : "TODAY", 34, 184, 2);
-    tft.setTextColor(mutedColor, panelColor);
-    tft.drawString(isKimi ? "USAGE" : "TOKENS", 35, 201, 1);
+    if (isWindowed) {
+      tft.setTextDatum(MC_DATUM);
+      drawBoldString("5H", 53, 196, 2, TFT_GREEN);
+    } else {
+      tft.setTextDatum(MC_DATUM);
+      drawBoldString("RESET", 53, 196, 2, TFT_GREEN);
+    }
   }
   if (force || !domesticDrawCache.initialized || model != domesticDrawCache.model
       || provider != domesticDrawCache.provider) {
@@ -1255,7 +1316,7 @@ void drawDomesticScreen(bool force = false) {
     int numberY = numberFont == 7 ? 90 : numberFont == 4 ? 101 : 108;
     int percentY = numberFont == 7 ? 105 : numberFont == 4 ? 108 : 108;
     int numberWidth = tft.textWidth(planNumber, numberFont);
-    int percentWidth = p.planPct >= 0 ? tft.textWidth("%", percentFont) : 0;
+    int percentWidth = displayPct >= 0 ? tft.textWidth("%", percentFont) : 0;
     int left = SCREEN_CX - (numberWidth + (percentWidth ? 4 + percentWidth : 0)) / 2;
     tft.setTextDatum(TL_DATUM);
     drawBoldString(planNumber, left, numberY, numberFont, numberColor);
@@ -1268,22 +1329,30 @@ void drawDomesticScreen(bool force = false) {
     tft.fillRect(30, 151, 180, 16, TFT_BLACK);
     tft.setTextDatum(TL_DATUM);
     tft.setTextColor(mutedColor, TFT_BLACK);
-    tft.drawString("REMAINING", 37, 153, 1);
+    tft.drawString(isWindowed ? "RESET" : "REMAINING", 37, 153, 1);
     tft.setTextDatum(TR_DATUM);
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
     tft.drawString(remaining, 203, 151, 2);
   }
-  if (force || !domesticDrawCache.initialized || tokens != domesticDrawCache.tokens) {
-    tft.fillRect(104, 181, 101, 29, panelColor);
-    tft.setTextDatum(TR_DATUM);
-    tft.setTextColor(TFT_CYAN, panelColor);
-    tft.drawString(tokens, 203, 184, 4);
+  if (force || !domesticDrawCache.initialized || tokens != domesticDrawCache.tokens
+      || reset != domesticDrawCache.reset || isWindowed != domesticDrawCache.windowed) {
+    tft.fillRect(87, 181, 131, 29, panelColor);
+    if (isWindowed) {
+      tft.setTextDatum(MC_DATUM);
+      drawBoldString(tokens, 120, 196, 2, TFT_WHITE);
+      drawBoldString(reset, 187, 196, 2, TFT_CYAN);
+    } else {
+      tft.setTextDatum(MC_DATUM);
+      drawBoldString(tokens, 153, 196, 2, TFT_CYAN);
+    }
   }
   domesticDrawCache.provider = provider;
   domesticDrawCache.model = model;
   domesticDrawCache.tokens = tokens;
+  domesticDrawCache.reset = reset;
   domesticDrawCache.plan = plan;
   domesticDrawCache.remaining = remaining;
+  domesticDrawCache.windowed = isWindowed;
   domesticDrawCache.initialized = true;
 }
 
@@ -1587,6 +1656,7 @@ bool applyWeatherJson(JsonObject doc) {
   weatherStatus.textRev = doc["text_rev"] | -1;
   weatherStatus.dateCenterX = doc["date_center_x"] | (WEATHER_DATE_W / 2);
   weatherStatus.headerCenterX = doc["header_center_x"] | (WEATHER_HEADER_W / 2);
+  weatherStatus.rangeY = constrain((int)(doc["range_y"] | 34), 32, 35);
   weatherStatus.loaded = weatherStatus.epochUtc > 0;
   weatherSyncMs = millis();
   if (effectiveMode() == MODE_WEATHER) drawWeatherScreen(false);
@@ -2057,10 +2127,10 @@ void drawWeatherScreen(bool force) {
   int rangeX = max(2, weatherHeaderCenter() - (lowWidth + rangeGap + highWidth) / 2);
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString(lowText, rangeX, 34, 2); tft.drawString(lowText, rangeX + 1, 34, 2);
+  tft.drawString(lowText, rangeX, weatherStatus.rangeY, 2); tft.drawString(lowText, rangeX + 1, weatherStatus.rangeY, 2);
   tft.setTextColor(TFT_ORANGE, TFT_BLACK);
   int highX = rangeX + lowWidth + rangeGap;
-  tft.drawString(highText, highX, 34, 2); tft.drawString(highText, highX + 1, 34, 2);
+  tft.drawString(highText, highX, weatherStatus.rangeY, 2); tft.drawString(highText, highX + 1, weatherStatus.rangeY, 2);
   if (textNeedsUpdate && drawWeatherAirFromBridge()) weatherTextDrawnRev = weatherStatus.textRev;
   drawWeatherClock();
   tft.fillRect(WEATHER_CONTENT_LEFT, 158, 134, 72, TFT_BLACK);
@@ -2124,7 +2194,11 @@ void readDomesticProvider(JsonObject source, DomesticProviderStatus &target) {
   target.planPctText = source["plan_pct_text"] | "";
   target.remainingPctText = source["remaining_pct_text"] | "";
   target.fiveHourPct = source["five_hour_pct"] | -1.0;
+  target.fiveHourResetMin = source["five_hour_reset_min"] | -1;
   target.weeklyPct = source["weekly_pct"] | -1.0;
+  target.weeklyResetMin = source["weekly_reset_min"] | -1;
+  target.planResetAt = source["plan_reset_at"] | 0UL;
+  target.planResetMin = source["plan_reset_min"] | -1;
 }
 
 void applyCodexCompletionState(uint32_t incomingCompletionAt,

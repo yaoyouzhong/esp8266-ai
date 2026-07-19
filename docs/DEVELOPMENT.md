@@ -30,6 +30,8 @@ Windows 版另有 USB 优先传输，CH340 串口为 460800：小型控制帧以
 USB 覆盖状态、网速、完整音乐画面、天气、股票、设备控制、GIF 上传和镜像精灵读取；连续 8 秒未收到
 USB 心跳时固件自动回退 HTTP。图片在设备端边收边画，GIF 边收边写 LittleFS，均不缓存
 整个文件到 ESP8266 RAM。
+天气状态中的 `header_center_x` 与 `range_y` 由 Windows 根据中文标题位图的实际像素边界计算，
+设备据此让高低温随地区标题的宽度和字号同步对齐。
 
 ## 目录结构
 
@@ -86,7 +88,9 @@ curl -s http://localhost:8765/status | python3 -m json.tool
 {
   "claude": {"status": "working", "tokens_today": 4868001, "session_min": 26, "session_window_min": 300},
   "codex":  {"status": "offline", "tokens_today": 61471, "primary_pct": 1.0, "primary_window_min": 300,
-             "primary_reset_min": 0, "weekly_pct": 2.0, "weekly_window_min": 10080, "weekly_reset_min": 8729}
+             "primary_reset_min": 0, "weekly_pct": 2.0, "weekly_window_min": 10080, "weekly_reset_min": 8729},
+  "domestic": {"active_provider": "qwen", "active": {"plan_pct": 99.18,
+               "plan_reset_at": 1785808800, "plan_reset_min": 23040}}
 }
 ```
 
@@ -333,10 +337,11 @@ Windows 会把股票名称和天气三块中文位图合并成 RLE 页面缓存�
 
 - 模型名和 `tokens_today`：扫描 `%USERPROFILE%\.claude\projects\**\*.jsonl`，所以只统计
   写入 Claude Code 会话日志的调用；其他应用即使共用同一个 Token Plan，也不会计入。
-- 订阅百分比：授权窗口在厂商控制台内读取账号页面已经返回的用量响应。阿里云百炼读取
-  Token Plan 及订阅版本；设备把团队版、企业版等版本映射为 `TEAM`、`ENTERPRISE` 等金色徽标。
+- 订阅百分比和重置时间：授权窗口在厂商控制台内读取账号页面已经返回的用量响应。阿里云百炼
+  Token Plan 使用总额度百分比和固定 `plan_reset_at`；若产品是 Coding Plan，只有控制台实际返回
+  5H/WK 窗口时才展示对应百分比和倒计时。设备把团队版、企业版等版本映射为 `TEAM`、`ENTERPRISE` 等金色徽标。
   月之暗面从 Kimi Coding Plan 页面响应读取会员权益，并从 `BillingService/GetUsages`
-  的 `detail` 与 `limits[].detail` 计算 Weekly 和 5h 已用百分比。当前单选厂商在启动时立即读取、随后每 2 分钟
+  的 `detail` 与 `limits[].detail` 计算 Weekly 和 5H 已用百分比，同时从控制台卡片读取各自重置时间。当前单选厂商在启动时立即读取、随后每 2 分钟
   使用持久化 WebView2 登录态后台刷新；同一厂商最少间隔 60 秒，供应商返回 429 时退避 5 分钟。结果缓存到
   `%APPDATA%\AIClockBridge\domestic-quota-cache.json`。
 
