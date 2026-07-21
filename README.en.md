@@ -63,7 +63,7 @@ The bridge lives in your menu bar / tray. Windows uses direct CH340 serial trans
   <img src="docs/images/working.jpg" width="640" alt="In action">
 </p>
 
-Daily use is all on the tray icon: **left-click** opens a live mirror (with a brightness slider); **right-click** opens grouped menus for quota, device connection, display modes, page cycling, content, pets and bridge service. The cycle supports selected pages, Move Up/Move Down ordering and 10/15/30/60-second intervals; a manual page switch stops cycling.
+Daily use is all on the tray icon: **left-click** opens a live mirror (with a brightness slider); **right-click** opens grouped menus for quota, device connection, display modes, page cycling, content, pets and bridge service. Page cycling is enabled on first launch with a 15-second Codex, Claude, weather and stock sequence; users can select pages, reorder them and choose a 10/15/30/60-second interval. A manual page switch stops cycling.
 The **Claude + Codex Quota** display mode puts both providers' limits and reset countdowns on one page.
 **Display mode → Domestic models** lists the major Chinese vendors and selects exactly one. Alibaba Bailian and Moonshot Kimi are currently wired for verified quota capture; other entries are marked pending.
 Screen saver controls are under **Display mode → Screen saver**, including timeout selection and immediate preview.

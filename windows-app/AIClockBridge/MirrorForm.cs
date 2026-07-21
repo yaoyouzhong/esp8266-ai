@@ -604,22 +604,56 @@ sealed class MirrorControl : Control
     void DrawWeatherScene(Graphics g)
     {
         var w = Weather;
-        var headerFontSize = w.City.Length + w.Condition.Length > 5 ? 15 : 17;
+        using var headerFormat = (StringFormat)StringFormat.GenericTypographic.Clone();
+        headerFormat.FormatFlags |= StringFormatFlags.NoWrap;
+        var headerFontSize = 20f;
+        SizeF citySize = SizeF.Empty;
+        for (; headerFontSize > 10f; headerFontSize -= 1f)
+        {
+            using var candidate = new Font("Microsoft YaHei UI", headerFontSize,
+                FontStyle.Bold, GraphicsUnit.Pixel);
+            citySize = g.MeasureString(w.City, candidate, int.MaxValue, headerFormat);
+            if (Math.Ceiling(citySize.Width) <= 120) break;
+        }
         using var headerFont = new Font("Microsoft YaHei UI", headerFontSize, FontStyle.Bold, GraphicsUnit.Pixel);
         using var rangeFont = new Font("Consolas", 14, FontStyle.Bold, GraphicsUnit.Pixel);
         using var timeFont = new Font("Consolas", 48, FontStyle.Bold, GraphicsUnit.Pixel);
         using var secondFont = new Font("Consolas", 25, FontStyle.Regular, GraphicsUnit.Pixel);
         using var dateFont = new Font("Microsoft YaHei UI", 19, FontStyle.Bold, GraphicsUnit.Pixel);
         using var metricFont = new Font("Consolas", 24, FontStyle.Regular, GraphicsUnit.Pixel);
-        g.DrawString($"{w.City} {w.Condition}", headerFont, Brushes.White, new RectangleF(14, 1, 130, 26));
+        citySize = g.MeasureString(w.City, headerFont, int.MaxValue, headerFormat);
+        var cityY = 1 + Math.Max(0, (26 - citySize.Height) / 2f);
+        g.DrawString(w.City, headerFont, Brushes.White, 14, cityY, headerFormat);
         var rangeY = headerFontSize < 17 ? 33 : 34;
         g.DrawString($"L {(int)Math.Round(w.Low)}C", rangeFont, Brushes.Cyan, 20, rangeY);
         g.DrawString($"H {(int)Math.Round(w.High)}C", rangeFont, Brushes.Orange, 81, rangeY);
-        using (var badgeFont = new Font("Microsoft YaHei UI", w.AirQuality.Length > 1 ? 12 : 18, FontStyle.Bold, GraphicsUnit.Pixel))
-        using (var badgeFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-            g.DrawString(w.AirQuality, badgeFont, Brushes.Gold, new RectangleF(136, 12, 42, 30), badgeFormat);
-        using (var iconFont = new Font("Segoe UI Symbol", 28, FontStyle.Regular, GraphicsUnit.Pixel))
-            g.DrawString(w.Icon <= 1 ? "☀" : "☁", iconFont, Brushes.Yellow, 190, 18);
+        if (!string.IsNullOrWhiteSpace(w.AirQuality) && w.AirQuality != "--")
+        {
+            var airColor = WeatherMonitor.AirQualityColor(w.AirQuality);
+            var airBadgeRect = w.AirQuality.Length > 1
+                ? new RectangleF(137.5f, 15f, 39f, 24f)
+                : new RectangleF(144.5f, 14.5f, 25f, 25f);
+            using (var badgePath = RoundedRect(airBadgeRect, w.AirQuality.Length > 1 ? 8f : 12.5f))
+            using (var badgeFill = new SolidBrush(WeatherMonitor.BadgeBackground(airColor)))
+            using (var badgeBorder = new Pen(airColor, 1.4f))
+            {
+                g.FillPath(badgeFill, badgePath);
+                g.DrawPath(badgeBorder, badgePath);
+            }
+            using var badgeFont = new Font("Microsoft YaHei UI", w.AirQuality.Length > 1 ? 12 : 18,
+                FontStyle.Bold, GraphicsUnit.Pixel);
+            using var badgeBrush = new SolidBrush(airColor);
+            using var badgeFormat = new StringFormat
+                { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            g.DrawString(w.AirQuality, badgeFont, badgeBrush,
+                new RectangleF(136, 12, 42, 30), badgeFormat);
+        }
+        using (var conditionFont = new Font("Microsoft YaHei UI", w.Condition.Length > 1 ? 19 : 22,
+                   FontStyle.Bold, GraphicsUnit.Pixel))
+        using (var conditionBrush = new SolidBrush(WeatherMonitor.ConditionColor(w.Condition)))
+        using (var conditionFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            g.DrawString(w.Condition, conditionFont, conditionBrush,
+                new RectangleF(184, 12, 52, 30), conditionFormat);
 
         var now = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromSeconds(w.UtcOffsetS));
         var hm = now.ToString("HHmm");

@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Globalization;
 using System.Net;
 using System.Text.Json;
@@ -10,15 +11,16 @@ namespace AIClockBridge;
 // when the provider or network is temporarily unreachable.
 sealed class WeatherMonitor
 {
-    public const int HeaderW = 130, HeaderH = 26;
+    public const int HeaderW = 122, HeaderH = 26;
     public const int DateW = 190, DateH = 30;
-    public const int AirW = 42, AirH = 30;
+    public const int AirW = 100, AirH = 30;
     const string CityKey = "weather_city";
     const string AnimationKey = "weather_animation";
     const string ApiHostKey = "qweather_api_host";
     const string AutoLocationKey = "weather_auto_location";
     const string LatitudeKey = "weather_latitude";
     const string LongitudeKey = "weather_longitude";
+    const double LocationUpdateThresholdMeters = 1000;
     const string CredentialTarget = "AIClockBridge/QWeatherApiKey";
     static readonly HttpClient Http = new(new HttpClientHandler
     {
@@ -139,18 +141,26 @@ sealed class WeatherMonitor
     public async Task Refresh()
     {
         var city = City;
-        if (city.Length == 0 && !AutoLocation) return;
+        var autoLocation = AutoLocation;
+        if (city.Length == 0 && !autoLocation) return;
         try
         {
+            var latitude = Latitude;
+            var longitude = Longitude;
+            if (autoLocation)
+                (latitude, longitude) = await RefreshAutomaticLocation(latitude, longitude);
+            if (autoLocation && latitude == 0 && longitude == 0)
+                throw new InvalidOperationException("尚未取得 Windows 定位坐标。 ");
+
             Snapshot snapshot = null;
             var host = QWeatherApiHost;
             var apiKey = CredentialStore.Read(CredentialTarget);
             if (host.Length > 0 && apiKey.Length > 0)
             {
-                try { snapshot = await FetchQWeather(host, apiKey, city, AutoLocation, Latitude, Longitude); }
+                try { snapshot = await FetchQWeather(host, apiKey, city, autoLocation, latitude, longitude); }
                 catch { /* provider fallback below */ }
             }
-            snapshot ??= await FetchOpenMeteo(city, AutoLocation, Latitude, Longitude);
+            snapshot ??= await FetchOpenMeteo(city, autoLocation, latitude, longitude);
             SetSnapshot(snapshot);
             SaveCache(snapshot);
         }
@@ -158,6 +168,47 @@ sealed class WeatherMonitor
         {
             lock (_lock) if (_snapshot.UpdatedUtc > 0) _snapshot.Stale = true;
         }
+    }
+
+    static async Task<(double Latitude, double Longitude)> RefreshAutomaticLocation(
+        double savedLatitude, double savedLongitude)
+    {
+        try
+        {
+            var current = await WindowsLocation.LocateSilently();
+            if (savedLatitude != 0 || savedLongitude != 0)
+            {
+                var distance = DistanceMeters(savedLatitude, savedLongitude,
+                    current.Latitude, current.Longitude);
+                if (distance < LocationUpdateThresholdMeters)
+                    return (savedLatitude, savedLongitude);
+            }
+
+            Settings.Set(LatitudeKey, current.Latitude.ToString("F6", CultureInfo.InvariantCulture));
+            Settings.Set(LongitudeKey, current.Longitude.ToString("F6", CultureInfo.InvariantCulture));
+            return (current.Latitude, current.Longitude);
+        }
+        catch
+        {
+            // Location services may be temporarily unavailable. Weather still
+            // refreshes from the last known coordinates instead of going blank.
+            return (savedLatitude, savedLongitude);
+        }
+    }
+
+    static double DistanceMeters(double latitude1, double longitude1,
+                                 double latitude2, double longitude2)
+    {
+        const double earthRadiusMeters = 6371000;
+        var lat1 = latitude1 * Math.PI / 180;
+        var lat2 = latitude2 * Math.PI / 180;
+        var deltaLat = (latitude2 - latitude1) * Math.PI / 180;
+        var deltaLon = (longitude2 - longitude1) * Math.PI / 180;
+        var sinLat = Math.Sin(deltaLat / 2);
+        var sinLon = Math.Sin(deltaLon / 2);
+        var a = sinLat * sinLat + Math.Cos(lat1) * Math.Cos(lat2) * sinLon * sinLon;
+        a = Math.Clamp(a, 0, 1);
+        return earthRadiusMeters * 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
     }
 
     public async Task<Snapshot> TestQWeather(string host, string apiKey, string city,
@@ -239,7 +290,7 @@ sealed class WeatherMonitor
         city = CompactPlaceName(city);
         if (name.Length == 0) return CompactPlaceName(fallback);
         if (city.Length == 0 || string.Equals(city, name, StringComparison.OrdinalIgnoreCase)) return name;
-        return city + name;
+        return city + " " + name;
     }
 
     static string CompactPlaceName(string value)
@@ -315,23 +366,17 @@ sealed class WeatherMonitor
     void RenderText(Snapshot snapshot)
     {
         var local = DateTimeOffset.FromUnixTimeSeconds(snapshot.EpochUtc).ToOffset(TimeSpan.FromSeconds(snapshot.UtcOffsetS));
-        var header = $"{snapshot.City} {snapshot.Condition}";
+        var header = snapshot.City;
         var date = $"{local.Month}月{local.Day}日 周{Weekday(local.DayOfWeek)}";
-        var key = header + "\n" + date + "\n" + snapshot.AirQuality;
+        var key = header + "\n" + snapshot.Condition + "\n" + date + "\n" + snapshot.AirQuality;
         lock (_lock) if (key == _lastText) return;
         using var headerBmp = new Bitmap(HeaderW, HeaderH);
         using var dateBmp = new Bitmap(DateW, DateH);
         using var airBmp = new Bitmap(AirW, AirH);
-        // The PM badge begins at device x=136 while this bitmap starts at x=14,
-        // leaving 122 px for visible header text. Four-character locations such
-        // as "南京秦淮" need one smaller font step so the final weather glyph is
-        // not overwritten by the badge.
-        var headerFontSize = snapshot.City.Length + snapshot.Condition.Length > 5 ? 9f : 10f;
-        DrawChineseText(headerBmp, header, headerFontSize, Color.White, centered: false);
+        var cityCenterX = DrawWeatherHeader(headerBmp, snapshot.City);
         DrawChineseText(dateBmp, date, 11f, Color.White, centered: false);
-        DrawAirBadge(airBmp, snapshot.AirQuality);
+        DrawAirStatus(airBmp, snapshot.AirQuality, snapshot.Condition);
         var dateCenterX = VisibleTextCenterX(dateBmp);
-        var headerCenterX = VisibleTextCenterX(headerBmp);
         var rangeY = Math.Clamp(34 + (VisibleTextBottomY(headerBmp) - 24) / 2, 32, 35);
         lock (_lock)
         {
@@ -340,7 +385,7 @@ sealed class WeatherMonitor
             _dateBitmap = Rgb565.Encode(dateBmp);
             _airBitmap = Rgb565.Encode(airBmp);
             _dateCenterX = dateCenterX;
-            _headerCenterX = headerCenterX;
+            _headerCenterX = cityCenterX;
             _rangeY = rangeY;
             _textRev++;
         }
@@ -373,42 +418,122 @@ sealed class WeatherMonitor
         return right >= left ? (left + right + 1) / 2 : bitmap.Width / 2;
     }
 
-    static void DrawChineseText(Bitmap bitmap, string text, float fontSize, Color color, bool centered)
+    static int DrawWeatherHeader(Bitmap bitmap, string city)
+    {
+        const float maxCityFontSize = 20f;
+        const float minCityFontSize = 10f;
+        using var graphics = Graphics.FromImage(bitmap);
+        graphics.Clear(Color.Black);
+        graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+        using var format = (StringFormat)StringFormat.GenericTypographic.Clone();
+        format.FormatFlags |= StringFormatFlags.NoWrap;
+        var cityFontSize = maxCityFontSize;
+        Font cityFont = null;
+        SizeF citySize = SizeF.Empty;
+        for (; cityFontSize >= minCityFontSize; cityFontSize -= 1f)
+        {
+            cityFont?.Dispose();
+            cityFont = new Font("Microsoft YaHei UI", cityFontSize,
+                FontStyle.Bold, GraphicsUnit.Pixel);
+            citySize = graphics.MeasureString(city, cityFont, int.MaxValue, format);
+            if (Math.Ceiling(citySize.Width) <= HeaderW - 2) break;
+        }
+        using (cityFont)
+        {
+            var cityY = Math.Max(0, (HeaderH - citySize.Height) / 2f);
+            graphics.DrawString(city, cityFont, Brushes.White, 0, cityY, format);
+            return VisibleTextCenterX(bitmap);
+        }
+    }
+
+    static void DrawChineseText(Bitmap bitmap, string text, float fontSize, Color color,
+                                bool centered, int maxWidth = 0)
     {
         using var graphics = Graphics.FromImage(bitmap);
         graphics.Clear(Color.Black);
         graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
         using var font = new Font("Microsoft YaHei UI", fontSize, FontStyle.Bold);
         var horizontal = centered ? TextFormatFlags.HorizontalCenter : TextFormatFlags.Left;
-        TextRenderer.DrawText(graphics, text, font, new Rectangle(0, 0, bitmap.Width, bitmap.Height),
+        var width = maxWidth > 0 ? Math.Min(maxWidth, bitmap.Width) : bitmap.Width;
+        TextRenderer.DrawText(graphics, text, font, new Rectangle(0, 0, width, bitmap.Height),
             color, Color.Black, horizontal | TextFormatFlags.VerticalCenter
                 | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
     }
 
-    static void DrawAirBadge(Bitmap bitmap, string air)
+    static void DrawAirStatus(Bitmap bitmap, string air, string condition)
     {
         using var graphics = Graphics.FromImage(bitmap);
         graphics.Clear(Color.Black);
-        if (string.IsNullOrWhiteSpace(air) || air == "--") return;
-        var color = air switch
-        {
-            "优" => Color.LimeGreen,
-            "良" => Color.Gold,
-            "轻度" => Color.Orange,
-            "中度" => Color.OrangeRed,
-            _ => Color.Red,
-        };
         graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-        using var font = new Font("Microsoft YaHei UI", air.Length > 1 ? 12f : 18f,
-                                  FontStyle.Bold, GraphicsUnit.Pixel);
-        using var brush = new SolidBrush(color);
-        using var format = new StringFormat
+        if (!string.IsNullOrWhiteSpace(air) && air != "--")
+        {
+            var airColor = AirQualityColor(air);
+            var badgeRect = air.Length > 1
+                ? new RectangleF(1.5f, 3f, 39f, 24f)
+                : new RectangleF(8.5f, 2.5f, 25f, 25f);
+            using var badgePath = RoundedRect(badgeRect, air.Length > 1 ? 8f : 12.5f);
+            using var badgeFill = new SolidBrush(BadgeBackground(airColor));
+            using var badgeBorder = new Pen(airColor, 1.4f);
+            graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            graphics.FillPath(badgeFill, badgePath);
+            graphics.DrawPath(badgeBorder, badgePath);
+            using var airFont = new Font("Microsoft YaHei UI", air.Length > 1 ? 12f : 18f,
+                                         FontStyle.Bold, GraphicsUnit.Pixel);
+            using var airBrush = new SolidBrush(airColor);
+            using var airFormat = new StringFormat
+            {
+                Alignment = StringAlignment.Center,
+                LineAlignment = StringAlignment.Center,
+                FormatFlags = StringFormatFlags.NoWrap,
+            };
+            graphics.DrawString(air, airFont, airBrush, new RectangleF(0, 0, 42, AirH), airFormat);
+        }
+        if (string.IsNullOrWhiteSpace(condition)) return;
+        using var conditionFont = new Font("Microsoft YaHei UI", condition.Length > 1 ? 19f : 22f,
+                                           FontStyle.Bold, GraphicsUnit.Pixel);
+        using var conditionBrush = new SolidBrush(ConditionColor(condition));
+        using var conditionFormat = new StringFormat
         {
             Alignment = StringAlignment.Center,
             LineAlignment = StringAlignment.Center,
             FormatFlags = StringFormatFlags.NoWrap,
         };
-        graphics.DrawString(air, font, brush, new RectangleF(0, 0, bitmap.Width, bitmap.Height), format);
+        graphics.DrawString(condition, conditionFont, conditionBrush,
+            new RectangleF(48, 0, 52, AirH), conditionFormat);
+    }
+
+    static GraphicsPath RoundedRect(RectangleF rect, float radius)
+    {
+        var path = new GraphicsPath();
+        var diameter = radius * 2;
+        path.AddArc(rect.X, rect.Y, diameter, diameter, 180, 90);
+        path.AddArc(rect.Right - diameter, rect.Y, diameter, diameter, 270, 90);
+        path.AddArc(rect.Right - diameter, rect.Bottom - diameter, diameter, diameter, 0, 90);
+        path.AddArc(rect.X, rect.Bottom - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
+    internal static Color AirQualityColor(string air) => air switch
+    {
+        "优" => Color.FromArgb(45, 227, 123),
+        "良" => Color.FromArgb(255, 200, 61),
+        "轻度" => Color.FromArgb(255, 154, 61),
+        "中度" => Color.FromArgb(255, 91, 71),
+        _ => Color.FromArgb(255, 72, 92),
+    };
+
+    internal static Color BadgeBackground(Color color) =>
+        Color.FromArgb(Math.Max(3, color.R / 9), Math.Max(3, color.G / 9), Math.Max(3, color.B / 9));
+
+    internal static Color ConditionColor(string condition)
+    {
+        if (condition.Contains('晴')) return Color.Gold;
+        if (condition.Contains('雨') || condition.Contains('雷')) return Color.DeepSkyBlue;
+        if (condition.Contains('雪')) return Color.LightCyan;
+        if (condition.Contains('沙') || condition.Contains('尘')) return Color.Orange;
+        if (condition.Contains('雾') || condition.Contains('霾')) return Color.LightGray;
+        return Color.Gainsboro;
     }
 
     static string Weekday(DayOfWeek day) => day switch

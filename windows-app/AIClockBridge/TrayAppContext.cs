@@ -28,6 +28,7 @@ sealed class TrayAppContext : ApplicationContext
         ("股票行情", "stock"), ("国产模型", "domestic"), ("音乐播放", "music"),
         ("系统监控", "net"),
     };
+    static readonly string[] DefaultCycleModes = { "codex", "claude", "weather", "stock" };
 
     readonly NotifyIcon _trayIcon;
     readonly StatusService _service;
@@ -337,7 +338,14 @@ sealed class TrayAppContext : ApplicationContext
 
     void LoadCycleSettings()
     {
-        _cycleEnabled = Settings.Get(CycleEnabledKey) == "1";
+        var configured = Settings.Get(CycleEnabledKey);
+        _cycleEnabled = configured.Length == 0 || configured == "1";
+        if (configured.Length == 0)
+        {
+            Settings.Set(CycleEnabledKey, "1");
+            if (Settings.Get(CyclePagesKey).Length == 0)
+                Settings.Set(CyclePagesKey, string.Join(",", DefaultCycleModes));
+        }
         _cycleIntervalSeconds = int.TryParse(Settings.Get(CycleIntervalKey), out var seconds)
             && new[] { 10, 15, 30, 60 }.Contains(seconds) ? seconds : 15;
         _cycleTimer.Interval = _cycleIntervalSeconds * 1000;
@@ -537,7 +545,7 @@ sealed class TrayAppContext : ApplicationContext
 
     void EnsureDefaultCyclePages()
     {
-        foreach (var mode in new[] { "codex", "claude", "weather", "stock" })
+        foreach (var mode in DefaultCycleModes)
             _cyclePageItems[mode].Checked = true;
         SaveCyclePages();
     }

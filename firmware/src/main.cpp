@@ -194,16 +194,15 @@ String stockLastCode[MAX_STOCKS], stockLastValue[MAX_STOCKS];
 unsigned long lastStockPollMs = 0;
 
 const unsigned long WEATHER_POLL_INTERVAL_MS = 15000;
-const int WEATHER_HEADER_W = 130, WEATHER_HEADER_H = 26;
+const int WEATHER_HEADER_W = 122, WEATHER_HEADER_H = 26;
 const int WEATHER_DATE_W = 190, WEATHER_DATE_H = 30;
-const int WEATHER_AIR_W = 42, WEATHER_AIR_H = 30;
+const int WEATHER_AIR_W = 100, WEATHER_AIR_H = 30;
 const int WEATHER_CONTENT_LEFT = 14;
 const int WEATHER_HEADER_Y = 1;
 const int WEATHER_DATE_X = WEATHER_CONTENT_LEFT, WEATHER_DATE_Y = 117;
-// Centre the air-quality badge between the city/range block and weather icon.
-// A four-character city plus a two-character condition still leaves a clear gap.
+// Air quality occupies the first 42 px; the weather condition replaces the
+// former icon in the 52 px region at the right.
 const int WEATHER_AIR_X = 136, WEATHER_AIR_Y = 12;
-const int WEATHER_ICON_X = 202, WEATHER_ICON_Y = 27;
 const int WEATHER_ANIM_BOTTOM = 224;
 struct WeatherStatus {
   float temp = 0, high = 0, low = 0, pm25 = -1;
@@ -1696,7 +1695,7 @@ bool drawWeatherLabelFromBridge(const char *path, int width, int height, int x, 
 }
 
 bool drawWeatherHeaderFromBridge() {
-  tft.fillRect(0, 0, 192, 28, TFT_BLACK);
+  tft.fillRect(0, 0, WEATHER_AIR_X, 28, TFT_BLACK);
   return drawWeatherLabelFromBridge("/weather/header.raw", WEATHER_HEADER_W, WEATHER_HEADER_H, weatherHeaderX(), WEATHER_HEADER_Y);
 }
 
@@ -1706,24 +1705,6 @@ bool drawWeatherDateFromBridge() {
 
 bool drawWeatherAirFromBridge() {
   return drawWeatherLabelFromBridge("/weather/air.raw", WEATHER_AIR_W, WEATHER_AIR_H, WEATHER_AIR_X, WEATHER_AIR_Y);
-}
-
-void drawWeatherIcon(int x, int y, int icon) {
-  if (icon == 0 || icon == 1) {
-    tft.fillCircle(x, y, 10, TFT_YELLOW);
-    for (int i = 0; i < 8; i++) {
-      float a = i * 0.785f;
-      tft.drawLine(x + (int)(cos(a) * 14), y + (int)(sin(a) * 14), x + (int)(cos(a) * 19), y + (int)(sin(a) * 19), TFT_YELLOW);
-    }
-  }
-  if (icon == 1 || icon == 2 || icon == 4 || icon == 6) {
-    tft.fillCircle(x - 8, y + 4, 8, TFT_LIGHTGREY); tft.fillCircle(x + 2, y, 11, TFT_LIGHTGREY); tft.fillCircle(x + 12, y + 5, 7, TFT_LIGHTGREY);
-    tft.fillRect(x - 16, y + 4, 36, 9, TFT_LIGHTGREY);
-  }
-  if (icon == 3) { tft.drawCircle(x, y, 13, TFT_LIGHTGREY); tft.drawCircle(x + 5, y - 5, 10, TFT_LIGHTGREY); }
-  if (icon == 4 || icon == 6) for (int i = -10; i <= 12; i += 11) tft.drawLine(x + i, y + 18, x + i - 3, y + 27, TFT_CYAN);
-  if (icon == 5) for (int i = -10; i <= 12; i += 11) { tft.drawLine(x + i, y + 18, x + i - 3, y + 24, TFT_WHITE); tft.drawLine(x + i - 3, y + 18, x + i, y + 24, TFT_WHITE); }
-  if (icon == 6) { tft.drawLine(x + 2, y + 15, x - 4, y + 27, TFT_YELLOW); tft.drawLine(x - 4, y + 27, x + 2, y + 25, TFT_YELLOW); }
 }
 
 void epochToLocal(uint32_t utc, int offset, int &year, int &month, int &day, int &hour, int &minute, int &second, int &weekday) {
@@ -2114,8 +2095,6 @@ void drawWeatherScreen(bool force) {
   bool textNeedsUpdate = !usbBridgeActive() && weatherStatus.textRev >= 0
     && weatherTextDrawnRev != weatherStatus.textRev;
   if (textNeedsUpdate) textNeedsUpdate = drawWeatherHeaderFromBridge() && drawWeatherDateFromBridge();
-  tft.fillRect(184, 0, 52, 60, TFT_BLACK);
-  drawWeatherIcon(WEATHER_ICON_X, WEATHER_ICON_Y, weatherStatus.icon);
   tft.fillRect(0, 28, WEATHER_AIR_X - 2, 23, TFT_BLACK);
   int high = (int)(weatherStatus.high + (weatherStatus.high >= 0 ? 0.5f : -0.5f));
   int low = (int)(weatherStatus.low + (weatherStatus.low >= 0 ? 0.5f : -0.5f));
@@ -2860,9 +2839,6 @@ bool drawBufferedUiBlob(UsbBlobKind kind, const char *path, bool render) {
       if (!readUiPixels(file, compressed, rle, (uint8_t *)rowBuf, WEATHER_AIR_W)) { ok = false; break; }
       if (render && effectiveMode() == MODE_WEATHER) tft.pushImage(WEATHER_AIR_X, WEATHER_AIR_Y + row, WEATHER_AIR_W, 1, rowBuf);
     }
-    // The centered header bitmap overlaps the icon's left edge with black
-    // background pixels, so repaint the icon after the atomic label swap.
-    if (ok && render && effectiveMode() == MODE_WEATHER) drawWeatherIcon(WEATHER_ICON_X, WEATHER_ICON_Y, weatherStatus.icon);
   }
   if (compressed && (rle.remaining != 0 || file.available())) ok = false;
   file.close();

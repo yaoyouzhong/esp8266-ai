@@ -12,6 +12,11 @@ static class WindowsLocation
         if (access != GeolocationAccessStatus.Allowed)
             throw new InvalidOperationException("Windows 定位权限未开启，请在系统“位置”设置中允许桌面应用访问位置。 ");
 
+        return await LocateSilently();
+    }
+
+    public static async Task<Result> LocateSilently()
+    {
         var locator = new Geolocator { DesiredAccuracyInMeters = 1000 };
         var position = await locator.GetGeopositionAsync(TimeSpan.FromMinutes(10), TimeSpan.FromSeconds(12));
         var point = position.Coordinate.Point.Position;
