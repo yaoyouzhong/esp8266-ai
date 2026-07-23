@@ -578,6 +578,13 @@ sealed class DomesticQuotaAuthForm : Form
                 return text === '我的权益' || text === 'My Benefits';
               });
               const value = card ? card.querySelector('.stats-card-value') : null;
+              const metric = pattern => {
+                const containers = Array.from(document.querySelectorAll(
+                  '.stats-card, .combined-card-quota, .combined-card-item'));
+                const container = containers.find(item => pattern.test(item.innerText || ''));
+                const match = container?.innerText?.match(/(\d+(?:\.\d+)?)\s*%/);
+                return match ? Number(match[1]) : null;
+              };
               const entries = Array.from(document.querySelectorAll(
                   '.stats-card-reset-time, .combined-card-reset-time'))
                 .map(item => ({
@@ -591,29 +598,22 @@ sealed class DomesticQuotaAuthForm : Form
               const fiveHour = unique.find(item => /频限明细|rate\s+limit/i.test(item.context));
               return {
                 membership: value ? value.textContent.trim() : '',
+                weeklyPct: metric(/本周用量|weekly\s+usage/i),
+                fiveHourPct: metric(/频限明细|rate\s+limit/i),
                 weeklyResetText: weekly?.text || '',
                 fiveHourResetText: fiveHour?.text || ''
               };
             })()
             """;
-        var quotaResponseSeen = false;
+        double? previousWeeklyPct = null;
+        double? previousFiveHourPct = null;
         var previousWeeklyReset = "";
         var previousFiveHourReset = "";
         var stableReadCount = 0;
-        for (var attempt = 0; attempt < 40; attempt++)
+        for (var attempt = 0; attempt < 100; attempt++)
         {
             if (IsDisposed || generation != _navigationGeneration || _activeProvider?.Id != "kimi"
                 || _web.CoreWebView2 == null) return;
-            if (!_capturedForNavigation)
-            {
-                await Task.Delay(500);
-                continue;
-            }
-            if (!quotaResponseSeen)
-            {
-                quotaResponseSeen = true;
-                await Task.Delay(1000); // Let Vue replace the initial full-window reset placeholder.
-            }
             try
             {
                 var result = await _web.CoreWebView2.ExecuteScriptAsync(script);
@@ -625,15 +625,36 @@ sealed class DomesticQuotaAuthForm : Form
                     ? weeklyValue.GetString()?.Trim() ?? "" : "";
                 var fiveHourReset = root.TryGetProperty("fiveHourResetText", out var fiveHourValue)
                     ? fiveHourValue.GetString()?.Trim() ?? "" : "";
-                if (weeklyReset.Length > 0 && fiveHourReset.Length > 0)
+                var weeklyPct = root.TryGetProperty("weeklyPct", out var weeklyPctValue)
+                    && weeklyPctValue.ValueKind == JsonValueKind.Number
+                    ? weeklyPctValue.GetDouble() : (double?)null;
+                var fiveHourPct = root.TryGetProperty("fiveHourPct", out var fiveHourPctValue)
+                    && fiveHourPctValue.ValueKind == JsonValueKind.Number
+                    ? fiveHourPctValue.GetDouble() : (double?)null;
+                if (weeklyPct.HasValue && fiveHourPct.HasValue
+                    && weeklyReset.Length > 0 && fiveHourReset.Length > 0)
                 {
-                    stableReadCount = weeklyReset == previousWeeklyReset
+                    stableReadCount = weeklyPct == previousWeeklyPct
+                        && fiveHourPct == previousFiveHourPct
+                        && weeklyReset == previousWeeklyReset
                         && fiveHourReset == previousFiveHourReset ? stableReadCount + 1 : 1;
+                    previousWeeklyPct = weeklyPct;
+                    previousFiveHourPct = fiveHourPct;
                     previousWeeklyReset = weeklyReset;
                     previousFiveHourReset = fiveHourReset;
                     if (stableReadCount >= 2)
                     {
-                        _service.SetKimiPageMetadata(membership, weeklyReset, fiveHourReset);
+                        _service.SetKimi(weeklyPct.Value, fiveHourPct, membership,
+                            DomesticQuotaService.ParseResetAt(weeklyReset),
+                            DomesticQuotaService.ParseResetAt(fiveHourReset));
+                        _capturedForNavigation = true;
+                        Console.Error.WriteLine(
+                            $"[quota] Kimi DOM updated: Weekly {weeklyPct.Value:0.##}%, "
+                            + $"5H {fiveHourPct.Value:0.##}%");
+                        BeginInvoke(() => _status.Text =
+                            $"已取得 Kimi 准确用量：Weekly {weeklyPct.Value:0.##}%，"
+                            + $"5h {fiveHourPct.Value:0.##}%（已缓存）");
+                        if (_backgroundRefresh) BeginInvoke(Hide);
                         return;
                     }
                 }
@@ -707,7 +728,12 @@ sealed class DomesticQuotaAuthForm : Form
 
     async Task ShowPendingStatus(DomesticProviderDefinition provider, int generation)
     {
-        await Task.Delay(TimeSpan.FromSeconds(provider.Id == "qwen" ? 45 : 12));
+        // Kimi's console now loads its Connect usage service after the main
+        // shell. On slower links the old 12-second window hid the background
+        // WebView before BillingService/GetUsage completed, leaving both
+        // Weekly and 5H stuck on the last successful cache.
+        await Task.Delay(TimeSpan.FromSeconds(provider.Id == "qwen" ? 45
+            : provider.Id == "kimi" ? 60 : 12));
         if (IsDisposed || generation != _navigationGeneration || _activeProvider != provider
             || _capturedForNavigation) return;
         var snapshot = _service.Snapshot;
@@ -750,7 +776,11 @@ sealed class DomesticQuotaAuthForm : Form
                 && alibabaUri.AbsolutePath.Equals("/data/api.json", StringComparison.OrdinalIgnoreCase);
             var isXiaomi = _activeProvider?.Id == "xiaomi"
                 && uri.Contains("/api/v1/tokenPlan/usage", StringComparison.OrdinalIgnoreCase);
-            var isKimi = _activeProvider?.Id == "kimi" && jsonRequest
+            var isKimiUsage = _activeProvider?.Id == "kimi"
+                && (resourceType == "XHR" || resourceType == "Fetch")
+                && IsKimiUsageEndpoint(uri);
+            var isKimi = _activeProvider?.Id == "kimi"
+                && (jsonRequest || isKimiUsage)
                 && uri.Contains("kimi", StringComparison.OrdinalIgnoreCase);
             if (statusCode == 429 && (isAlibaba || isXiaomi || isKimi))
             {
@@ -764,8 +794,11 @@ sealed class DomesticQuotaAuthForm : Form
             {
                 var endpoint = Uri.TryCreate(uri, UriKind.Absolute, out var parsed)
                     ? parsed.Host + parsed.AbsolutePath : uri.Split('?')[0];
-                _quotaResponses[requestId] =
-                    (isAlibaba ? "qwen" : isXiaomi ? "xiaomi" : "kimi", endpoint);
+                lock (_quotaResponses)
+                    _quotaResponses[requestId] =
+                        (isAlibaba ? "qwen" : isXiaomi ? "xiaomi" : "kimi", endpoint);
+                if (isKimiUsage)
+                    Console.Error.WriteLine($"[quota] Kimi usage response detected: {endpoint}");
             }
         }
         catch
@@ -783,7 +816,11 @@ sealed class DomesticQuotaAuthForm : Form
             requestId = finished.RootElement.GetProperty("requestId").GetString();
         }
         catch { return; }
-        if (requestId == null || !_quotaResponses.Remove(requestId, out var responseInfo)) return;
+        (string ProviderId, string Endpoint) responseInfo;
+        lock (_quotaResponses)
+        {
+            if (requestId == null || !_quotaResponses.Remove(requestId, out responseInfo)) return;
+        }
         try
         {
             var args = JsonSerializer.Serialize(new { requestId });
@@ -812,6 +849,9 @@ sealed class DomesticQuotaAuthForm : Form
                 fiveHourPct = kimi.Value.FiveHourPct;
                 _service.SetKimi(weeklyPct, fiveHourPct, membership,
                     kimi.Value.WeeklyResetAt, kimi.Value.FiveHourResetAt);
+                Console.Error.WriteLine(
+                    $"[quota] Kimi updated: Weekly {weeklyPct:0.##}%, 5H "
+                    + (fiveHourPct.HasValue ? $"{fiveHourPct.Value:0.##}%" : "--"));
             }
             else
             {
@@ -844,8 +884,17 @@ sealed class DomesticQuotaAuthForm : Form
         }
         catch (Exception ex)
         {
+            Console.Error.WriteLine(
+                $"[quota] {responseInfo.ProviderId} response parse failed at {responseInfo.Endpoint}: {ex.Message}");
             BeginInvoke(() => _status.Text = $"额度响应读取失败：{ex.Message}");
         }
+    }
+
+    static bool IsKimiUsageEndpoint(string uri)
+    {
+        if (!Uri.TryCreate(uri, UriKind.Absolute, out var parsed)) return false;
+        return parsed.AbsolutePath.Contains("BillingService/GetUsage",
+            StringComparison.OrdinalIgnoreCase);
     }
 
     async Task<bool> PersistLoginCookies(string url)
