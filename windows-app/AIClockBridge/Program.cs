@@ -390,7 +390,26 @@ static class Program
             Console.Error.WriteLine("[test-usb] five-pulse multi-completion alert verified");
 
             await Task.Delay(3500);
+            if (stocks.NameBitmap.Length != StockMonitor.NameW * StockMonitor.NameH * StockMonitor.MaxSymbols * 2)
+                throw new Exception("stock names cache does not cover the full watchlist");
+            using (var stockJson = JsonDocument.Parse(stocks.ToJson()))
+                if (stockJson.RootElement.GetProperty("page_size").GetInt32() != StockMonitor.RowsPerPage)
+                    throw new Exception("stock page size is missing from the bridge protocol");
             Console.Error.WriteLine($"[test-usb] stock page {stocks.Snapshot.Length} row(s), names {stocks.NameBitmap.Length} bytes");
+            if (stocks.Snapshot.Length > StockMonitor.RowsPerPage)
+            {
+                usb.SetDisplayMode("stock");
+                await Task.Delay(5600);
+                usb.RequestInfo();
+                for (var i = 0; i < 20 && usb.DeviceInfo?.StockPage != 1; i++)
+                {
+                    await Task.Delay(100);
+                    usb.RequestInfo();
+                }
+                if (usb.DeviceInfo?.StockPage != 1 || usb.DeviceInfo.StockPageCount < 2)
+                    throw new Exception($"stock pagination did not advance (page={usb.DeviceInfo?.StockPage}, count={usb.DeviceInfo?.StockPageCount})");
+                Console.Error.WriteLine($"[test-usb] stock pagination verified ({usb.DeviceInfo.StockPage + 1}/{usb.DeviceInfo.StockPageCount})");
+            }
             usb.SetDisplayMode("weather");
             await Task.Delay(3500);
             Console.Error.WriteLine($"[test-usb] weather page {weather.Current.City} {weather.Current.Temperature:F0}C, labels {weather.HeaderBitmap.Length + weather.DateBitmap.Length + weather.AirBitmap.Length} bytes");

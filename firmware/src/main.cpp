@@ -183,15 +183,18 @@ unsigned long lastMusicPollMs = 0;
 
 // ---------- stock watchlist / weather clock state ----------
 const unsigned long STOCK_POLL_INTERVAL_MS = 5000;
-const int MAX_STOCKS = 4;
+const unsigned long STOCK_PAGE_INTERVAL_MS = 5000;
+const int MAX_STOCKS = 20;
+const int STOCK_ROWS_PER_PAGE = 4;
 const int STOCK_NAME_W = 156, STOCK_NAME_H = 20;
 struct StockRow { String code, price, pct; int up = 0; };
 StockRow stocks[MAX_STOCKS];
 int stockCount = 0;
+int stockPage = 0;
 int stockNamesRev = -1, stockNamesDrawnRev = -1;
 bool stockEverLoaded = false, stockDirty = false, stockChromeDrawn = false;
-String stockLastCode[MAX_STOCKS], stockLastValue[MAX_STOCKS];
-unsigned long lastStockPollMs = 0;
+String stockLastCode[STOCK_ROWS_PER_PAGE], stockLastValue[STOCK_ROWS_PER_PAGE];
+unsigned long lastStockPollMs = 0, lastStockPageMs = 0;
 
 const unsigned long WEATHER_POLL_INTERVAL_MS = 15000;
 const int WEATHER_HEADER_W = 122, WEATHER_HEADER_H = 26;
@@ -1541,6 +1544,7 @@ void pollMusic() {
 // ---------- stock watchlist ----------
 
 bool applyStockJson(JsonObject doc) {
+  int oldPageCount = stockCount > 0 ? (stockCount + STOCK_ROWS_PER_PAGE - 1) / STOCK_ROWS_PER_PAGE : 1;
   JsonArray rows = doc["stocks"];
   stockCount = 0;
   for (JsonObject row : rows) {
@@ -1552,6 +1556,9 @@ bool applyStockJson(JsonObject doc) {
     stockCount++;
   }
   stockNamesRev = doc["names_rev"] | -1;
+  int pageCount = stockCount > 0 ? (stockCount + STOCK_ROWS_PER_PAGE - 1) / STOCK_ROWS_PER_PAGE : 1;
+  if (stockPage >= pageCount) stockPage = 0;
+  if (pageCount != oldPageCount) stockChromeDrawn = false;
   stockEverLoaded = true;
   stockDirty = true;
   return true;
@@ -1583,8 +1590,10 @@ bool drawStockNamesFromBridge() {
   for (int stock = 0; stock < MAX_STOCKS && ok; stock++) {
     for (int row = 0; row < STOCK_NAME_H; row++) {
       if (stream->readBytes((uint8_t *)rowBuf, rowBytes) != (int)rowBytes) { ok = false; break; }
-      if (effectiveMode() == MODE_STOCK && stock < stockCount)
-        tft.pushImage(70, 6 + stock * 54 + row, STOCK_NAME_W, 1, rowBuf);
+      int pageRow = stock - stockPage * STOCK_ROWS_PER_PAGE;
+      if (effectiveMode() == MODE_STOCK && stock < stockCount
+          && pageRow >= 0 && pageRow < STOCK_ROWS_PER_PAGE)
+        tft.pushImage(70, 6 + pageRow * 54 + row, STOCK_NAME_W, 1, rowBuf);
       yield();
     }
   }
@@ -1597,10 +1606,12 @@ void drawStockScreen(bool force = false) {
     tft.fillScreen(TFT_BLACK);
     stockChromeDrawn = true;
     stockNamesDrawnRev = -1;
-    for (int i = 0; i < MAX_STOCKS; i++) { stockLastCode[i] = "\x01"; stockLastValue[i] = "\x01"; }
+    for (int i = 0; i < STOCK_ROWS_PER_PAGE; i++) { stockLastCode[i] = "\x01"; stockLastValue[i] = "\x01"; }
     tft.setTextDatum(TC_DATUM);
     tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    tft.drawString("STOCKS", SCREEN_CX, 228, 1);
+    int pageCount = stockCount > 0 ? (stockCount + STOCK_ROWS_PER_PAGE - 1) / STOCK_ROWS_PER_PAGE : 1;
+    String footer = pageCount > 1 ? "STOCKS " + String(stockPage + 1) + "/" + String(pageCount) : "STOCKS";
+    tft.drawString(footer, SCREEN_CX, 228, 1);
   }
   stockDirty = false;
   if (stockCount == 0) {
@@ -1610,26 +1621,28 @@ void drawStockScreen(bool force = false) {
     tft.drawString(stockEverLoaded ? "No valid quotes" : "Waiting for bridge...", SCREEN_CX, 104, 2);
     return;
   }
-  for (int i = 0; i < MAX_STOCKS; i++) {
+  int pageStart = stockPage * STOCK_ROWS_PER_PAGE;
+  for (int i = 0; i < STOCK_ROWS_PER_PAGE; i++) {
     int y = 6 + i * 54;
-    bool has = i < stockCount;
-    String code = has ? stocks[i].code : "";
+    int stockIndex = pageStart + i;
+    bool has = stockIndex < stockCount;
+    String code = has ? stocks[stockIndex].code : "";
     if (code != stockLastCode[i]) {
       stockLastCode[i] = code;
       stockNamesDrawnRev = -1;
       tft.fillRect(0, y, SCREEN_W, 17, TFT_BLACK);
       if (has) { tft.setTextDatum(TL_DATUM); tft.setTextColor(TFT_DARKGREY, TFT_BLACK); tft.drawString(code, 14, y, 2); }
     }
-    String value = has ? stocks[i].price + "|" + stocks[i].pct + "|" + String(stocks[i].up) : "";
+    String value = has ? stocks[stockIndex].price + "|" + stocks[stockIndex].pct + "|" + String(stocks[stockIndex].up) : "";
     if (value != stockLastValue[i]) {
       stockLastValue[i] = value;
       tft.fillRect(0, y + 21, SCREEN_W, 33, TFT_BLACK);
       if (has) {
         tft.setTextDatum(TL_DATUM); tft.setTextColor(TFT_WHITE, TFT_BLACK);
-        tft.drawString(stocks[i].price, 14, y + 22, 4);
-        uint16_t color = stocks[i].up > 0 ? TFT_RED : stocks[i].up < 0 ? TFT_GREEN : TFT_LIGHTGREY;
+        tft.drawString(stocks[stockIndex].price, 14, y + 22, 4);
+        uint16_t color = stocks[stockIndex].up > 0 ? TFT_RED : stocks[stockIndex].up < 0 ? TFT_GREEN : TFT_LIGHTGREY;
         tft.setTextDatum(TR_DATUM); tft.setTextColor(color, TFT_BLACK);
-        tft.drawString(stocks[i].pct, 226, y + 22, 4);
+        tft.drawString(stocks[stockIndex].pct, 226, y + 22, 4);
       }
     }
   }
@@ -2462,6 +2475,9 @@ String deviceInfoJson() {
   doc["sprite_rev"] = spriteRev;
   doc["brightness"] = brightness;
   doc["fw"] = FW_VERSION;
+  doc["stock_page"] = stockPage;
+  doc["stock_page_count"] = stockCount > 0
+    ? (stockCount + STOCK_ROWS_PER_PAGE - 1) / STOCK_ROWS_PER_PAGE : 1;
   JsonObject cache = doc["ui_cache"].to<JsonObject>();
   cache["stock"] = LittleFS.exists(STOCK_UI_CACHE_FILE);
   cache["weather"] = LittleFS.exists(WEATHER_UI_CACHE_FILE);
@@ -2809,14 +2825,16 @@ bool drawBufferedUiBlob(UsbBlobKind kind, const char *path, bool render) {
       tft.fillScreen(TFT_BLACK);
       stockChromeDrawn = true;
       stockNamesDrawnRev = stockNamesRev;
-      for (int i = 0; i < MAX_STOCKS; i++) { stockLastCode[i] = "\x01"; stockLastValue[i] = "\x01"; }
+      for (int i = 0; i < STOCK_ROWS_PER_PAGE; i++) { stockLastCode[i] = "\x01"; stockLastValue[i] = "\x01"; }
       drawStockScreen(false);
     }
     for (int stock = 0; stock < MAX_STOCKS && ok; stock++) {
       for (int row = 0; row < STOCK_NAME_H; row++) {
         if (!readUiPixels(file, compressed, rle, (uint8_t *)rowBuf, STOCK_NAME_W)) { ok = false; break; }
-        if (render && effectiveMode() == MODE_STOCK && stock < stockCount)
-          tft.pushImage(70, 6 + stock * 54 + row, STOCK_NAME_W, 1, rowBuf);
+        int pageRow = stock - stockPage * STOCK_ROWS_PER_PAGE;
+        if (render && effectiveMode() == MODE_STOCK && stock < stockCount
+            && pageRow >= 0 && pageRow < STOCK_ROWS_PER_PAGE)
+          tft.pushImage(70, 6 + pageRow * 54 + row, STOCK_NAME_W, 1, rowBuf);
       }
     }
   } else {
@@ -3028,6 +3046,8 @@ void applyUsbDisplayMode(const String &mode) {
   } else if (displayMode == MODE_DOMESTIC) {
     drawDomesticScreen(true);
   } else if (displayMode == MODE_STOCK) {
+    stockPage = 0;
+    lastStockPageMs = millis();
     drawStockCachedOrLoading();
   } else if (displayMode == MODE_WEATHER) {
     drawWeatherCachedOrLoading();
@@ -3621,6 +3641,8 @@ void loop() {
     } else if (eff == MODE_DOMESTIC) {
       drawDomesticScreen(true);
     } else if (eff == MODE_STOCK) {
+      stockPage = 0;
+      lastStockPageMs = nowMs;
       lastStockPollMs = 0;
       drawStockCachedOrLoading();
     } else if (eff == MODE_WEATHER) {
@@ -3665,6 +3687,13 @@ void loop() {
     if (nowMs - lastStockPollMs >= STOCK_POLL_INTERVAL_MS) {
       lastStockPollMs = nowMs;
       pollStock();
+    }
+    int pageCount = stockCount > 0 ? (stockCount + STOCK_ROWS_PER_PAGE - 1) / STOCK_ROWS_PER_PAGE : 1;
+    if (pageCount > 1 && nowMs - lastStockPageMs >= STOCK_PAGE_INTERVAL_MS) {
+      lastStockPageMs = nowMs;
+      stockPage = (stockPage + 1) % pageCount;
+      if (!drawBufferedUiBlob(USB_STOCK_NAMES_RLE, STOCK_UI_CACHE_FILE, true))
+        drawStockScreen(true);
     }
     if (!stockChromeDrawn || stockDirty) drawStockScreen();
   } else if (eff == MODE_WEATHER) {

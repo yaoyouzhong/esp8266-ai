@@ -586,9 +586,12 @@ sealed class MirrorControl : Control
         using var valueFont = new Font("Consolas", 24, FontStyle.Regular, GraphicsUnit.Pixel);
         using var footerFont = new Font("Consolas", 8, FontStyle.Regular, GraphicsUnit.Pixel);
         using var right = new StringFormat { Alignment = StringAlignment.Far, Trimming = StringTrimming.EllipsisCharacter };
-        for (var i = 0; i < Math.Min(4, Stocks.Length); i++)
+        var pageCount = Math.Max(1, (Stocks.Length + StockMonitor.RowsPerPage - 1) / StockMonitor.RowsPerPage);
+        var page = pageCount == 1 ? 0 : (int)((Environment.TickCount64 / StockMonitor.PageIntervalMs) % pageCount);
+        var pageStart = page * StockMonitor.RowsPerPage;
+        for (var i = 0; i < Math.Min(StockMonitor.RowsPerPage, Stocks.Length - pageStart); i++)
         {
-            var row = Stocks[i];
+            var row = Stocks[pageStart + i];
             var y = 6 + i * 54;
             g.DrawString(row.Code, codeFont, Brushes.Gray, 14, y);
             g.DrawString(row.Name, nameFont, Brushes.LightGray, new RectangleF(70, y, 156, 20), right);
@@ -597,7 +600,9 @@ sealed class MirrorControl : Control
             g.DrawString(row.Pct, valueFont, change, new RectangleF(130, y + 20, 96, 31), right);
         }
         using var centered = new StringFormat { Alignment = StringAlignment.Center };
-        g.DrawString(Stocks.Length == 0 ? "Waiting for bridge..." : "STOCKS", footerFont,
+        var footer = Stocks.Length == 0 ? "Waiting for bridge..."
+            : pageCount > 1 ? $"STOCKS {page + 1}/{pageCount}" : "STOCKS";
+        g.DrawString(footer, footerFont,
                      Brushes.Gray, new RectangleF(0, Stocks.Length == 0 ? 104 : 228, 240, 12), centered);
     }
 
@@ -871,13 +876,13 @@ sealed class MirrorForm : Form
         BackColor = SystemColors.Control;
         Padding = new Padding(1);
 
-        ClientSize = new Size(Px(316), Px(424));
+        ClientSize = new Size(Px(360), Px(444));
 
-        _mirror.SetBounds(Px(14), Px(14), Px(288), Px(288));
+        _mirror.SetBounds(Px(36), Px(14), Px(288), Px(288));
         Controls.Add(_mirror);
 
         _modeButtons = new RadioButton[Modes.Length];
-        var segWidth = Px(288) / Modes.Length;
+        var segWidth = Px(332) / Modes.Length;
         for (int i = 0; i < Modes.Length; i++)
         {
             var btn = new RadioButton
@@ -888,8 +893,11 @@ sealed class MirrorForm : Form
                 Tag = Modes[i],
                 AutoSize = false,
                 Font = new Font("Microsoft YaHei UI", 7.5f),
+                FlatStyle = FlatStyle.Flat,
+                Padding = Padding.Empty,
             };
             btn.SetBounds(Px(14) + i * segWidth, Px(312), segWidth, Px(28));
+            btn.FlatAppearance.BorderColor = SystemColors.ControlDark;
             btn.CheckedChanged += ModeChanged;
             _modeButtons[i] = btn;
             Controls.Add(btn);
@@ -903,23 +911,23 @@ sealed class MirrorForm : Form
         };
         sunLabel.SetBounds(Px(12), Px(346), Px(24), Px(26));
         Controls.Add(sunLabel);
-        _brightness.SetBounds(Px(36), Px(346), Px(216), Px(26));
+        _brightness.SetBounds(Px(36), Px(346), Px(260), Px(26));
         _brightness.Scroll += (_, _) => OnBrightnessInput(final: false);
         _brightness.MouseUp += (_, _) => OnBrightnessInput(final: true);
         Controls.Add(_brightness);
-        _brightnessValue.SetBounds(Px(254), Px(346), Px(48), Px(26));
+        _brightnessValue.SetBounds(Px(298), Px(346), Px(48), Px(26));
         _brightnessValue.TextAlign = ContentAlignment.MiddleRight;
         _brightnessValue.ForeColor = SystemColors.GrayText;
         _brightnessValue.Font = new Font("Microsoft YaHei UI", 8.5f);
         _brightnessValue.Text = "100%";
         Controls.Add(_brightnessValue);
 
-        _statusLabel.SetBounds(Px(10), Px(378), Px(296), Px(36));
+        _statusLabel.SetBounds(Px(12), Px(376), Px(336), Px(58));
         _statusLabel.TextAlign = ContentAlignment.MiddleCenter;
         _statusLabel.ForeColor = SystemColors.GrayText;
         _statusLabel.Font = new Font("Microsoft YaHei UI", 8.5f);
         _statusLabel.Text = "连接设备中…";
-        _statusLabel.AutoEllipsis = true;
+        _statusLabel.AutoEllipsis = false;
         Controls.Add(_statusLabel);
 
         _pollTimer.Tick += async (_, _) => await Tick();
@@ -1051,7 +1059,7 @@ sealed class MirrorForm : Form
             : info.Mode == "music" ? "音乐播放"
             : info.Mode == "screensaver" ? "屏保"
             : info.Mode == "dual" ? "Claude + Codex 额度" : "固定显示";
-        _statusLabel.Text = $"{info.Ip} · {modeText} · 数据 {info.Bridge}";
+        _statusLabel.Text = $"{info.Ip} · {modeText}\n数据来源：{info.Bridge}";
     }
 
     /// Quota lines & ring exactly as the firmware computes them from /status.

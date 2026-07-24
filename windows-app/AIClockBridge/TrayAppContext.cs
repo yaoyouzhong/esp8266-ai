@@ -240,14 +240,7 @@ sealed class TrayAppContext : ApplicationContext
 
         var contentMenu = new ToolStripMenuItem("内容设置");
         contentMenu.DropDownItems.Add(MakeItem("设置自选股", (_, _) =>
-        {
-            var input = InputDialog.Show("自选股",
-                "逗号分隔：sh/sz/bj=A股、hk=港股、us=美股；屏幕最多显示 4 只。\n例如 sh600519,hk00700,usAAPL",
-                string.Join(",", StockMonitor.Symbols), "sh000001,usAAPL");
-            if (input == null) return;
-            StockMonitor.Symbols = input.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            _stocks.Refresh();
-        }));
+            _menu.BeginInvoke(OpenStockSettings)));
         var weatherMenu = new ToolStripMenuItem("设置天气");
         weatherMenu.DropDownItems.Add(MakeItem("数据源与定位", (_, _) =>
             _menu.BeginInvoke(OpenWeatherSettings)));
@@ -821,6 +814,12 @@ sealed class TrayAppContext : ApplicationContext
     void OpenWeatherSettings()
     {
         using var form = new WeatherSettingsForm(_weather);
+        form.ShowDialog();
+    }
+
+    void OpenStockSettings()
+    {
+        using var form = new StockSettingsForm(_stocks);
         form.ShowDialog();
     }
 

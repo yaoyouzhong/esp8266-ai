@@ -318,8 +318,8 @@ Windows 桥接提供以下只读端点，固件在 Wi-Fi 回退模式下读取�
 
 | 路径 | 内容 |
 |---|---|
-| `GET /stock` | 最多 4 只自选股的代码、价格、涨跌幅和名称版本 |
-| `GET /stock/names.raw` | 4 行股票中文名称 RGB565 位图 |
+| `GET /stock` | 最多 20 只自选股的代码、价格、涨跌幅、名称版本和分页参数 |
+| `GET /stock/names.raw` | 最多 20 行股票中文名称 RGB565 位图；设备按当前页读取其中 4 行 |
 | `GET /weather` | 城市、天气、时分秒、最高/最低温、湿度、PM2.5 和动画类型；`epoch_utc` 是桥接端当前 UTC，`updated_utc` 是最近成功天气数据的时间，两者不得混用 |
 | `GET /weather/header.raw` | 城市中文位图 |
 | `GET /weather/date.raw` | `M月d日 周X` 中文日期位图 |
@@ -330,7 +330,8 @@ Windows 桥接提供以下只读端点，固件在 Wi-Fi 回退模式下读取�
 定位失败时沿用上次成功坐标。
 实时天气和当日高低温使用和风天气；空气质量可独立回退 Open-Meteo，和风主请求失败时整页
 回退 Open-Meteo。API KEY 只保存在 Windows 凭据管理器 `AIClockBridge/QWeatherApiKey`，
-`settings.json` 仅保存 API Host、地区、定位开关和坐标。股票每 5 秒优先请求腾讯行情、失败后
+`settings.json` 仅保存 API Host、地区、定位开关和坐标。股票最多配置 20 只，每屏显示 4 只并在股票页内每 5 秒自动翻页；
+行情每 5 秒优先请求腾讯行情、失败后
 尝试新浪行情。网络失败时分别沿用 `%APPDATA%\AIClockBridge\weather-cache.json` 和进程内最近成功行情。
 Windows 会把股票名称和天气三块中文位图合并成 RLE 页面缓存推给设备；设备写入 LittleFS，
 切页时可立即显示，不再等待串口重传。`GET /api/info` 的 `ui_cache` 返回缓存状态和 CRC。

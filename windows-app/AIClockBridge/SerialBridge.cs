@@ -338,6 +338,8 @@ sealed class SerialBridge : IDisposable
             Mode = Str(root, "mode", "auto"), Effective = Str(root, "effective", "auto"),
             Showing = Str(root, "showing"), LastUpdateS = Int(root, "last_update_s", -1),
             SpriteRev = Int(root, "sprite_rev"), Brightness = Int(root, "brightness", 100),
+            StockPage = Int(root, "stock_page"),
+            StockPageCount = Int(root, "stock_page_count", 1),
         };
         if (root.TryGetProperty("claude", out var c))
         {
@@ -486,7 +488,7 @@ sealed class SerialBridge : IDisposable
                     Console.Error.WriteLine("[usb] stock names cache hit");
                 }
                 else if (data.Length > 0 && packed.Length > 0
-                    && await SendBlob("stock_names_rle", packed, StockMonitor.NameW, StockMonitor.NameH * StockMonitor.MaxRows, 15))
+                    && await SendBlob("stock_names_rle", packed, StockMonitor.NameW, StockMonitor.NameH * StockMonitor.MaxSymbols, 15))
                 {
                     Console.Error.WriteLine($"[usb] stock cache miss device={_deviceInfo?.StockUiCacheCrc ?? 0:X8} local={crc:X8}");
                     _lastStockNamesRev = rev;

@@ -27,6 +27,8 @@ class DeviceInfo
     public bool WeatherUiCached;
     public uint StockUiCacheCrc;
     public uint WeatherUiCacheCrc;
+    public int StockPage;
+    public int StockPageCount = 1;
     public int ClaudeW = 111, ClaudeH = 120;
     public int CodexW = 120, CodexH = 120;
 }
@@ -110,6 +112,8 @@ static class DeviceClient
                 SpriteRev = Int(root, "sprite_rev"),
                 Brightness = Int(root, "brightness", 100),
                 Showing = Str(root, "showing"),
+                StockPage = Int(root, "stock_page"),
+                StockPageCount = Int(root, "stock_page_count", 1),
             };
             info.Effective = Str(root, "effective", info.Mode);
             if (root.TryGetProperty("claude", out var claude))

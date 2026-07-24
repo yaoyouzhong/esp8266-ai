@@ -9,17 +9,19 @@ namespace AIClockBridge;
 // its last successful result when both fail, so an outage never blanks the page.
 sealed class StockMonitor
 {
-    public record Row(string Code, string Name, string Price, string Pct, int Up);
+    public record Row(string Symbol, string Code, string Name, string Price, string Pct, int Up);
 
     const string SymbolsKey = "stock_symbols";
-    public const int MaxRows = 4;
+    public const int MaxSymbols = 20;
+    public const int RowsPerPage = 4;
+    public const int PageIntervalMs = 5000;
     public const int NameW = 156, NameH = 20;
     static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(5) };
     static readonly Encoding Gbk;
 
     readonly object _lock = new();
     Row[] _rows = Array.Empty<Row>();
-    byte[] _nameBitmap = new byte[NameW * NameH * MaxRows * 2];
+    byte[] _nameBitmap = new byte[NameW * NameH * MaxSymbols * 2];
     int _namesRev;
     string _lastNamesKey = "";
     System.Threading.Timer _timer;
@@ -37,15 +39,24 @@ sealed class StockMonitor
         {
             var raw = Settings.Get(SymbolsKey);
             if (raw.Length == 0) raw = "sh000001";
-            return raw.Replace('，', ',').Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Select(Normalize).Take(MaxRows).ToArray();
+            var symbols = raw.Replace('，', ',').Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(Normalize).Take(MaxSymbols).ToArray();
+            var normalized = string.Join(",", symbols);
+            if (!raw.Equals(normalized, StringComparison.Ordinal)) Settings.Set(SymbolsKey, normalized);
+            return symbols;
         }
-        set => Settings.Set(SymbolsKey, string.Join(",", value.Select(Normalize).Take(MaxRows)));
+        set => Settings.Set(SymbolsKey, string.Join(",", value.Select(Normalize).Take(MaxSymbols)));
     }
 
     public int NamesRev { get { lock (_lock) return _namesRev; } }
     public byte[] NameBitmap { get { lock (_lock) return _nameBitmap.ToArray(); } }
     public Row[] Snapshot { get { lock (_lock) return _rows.ToArray(); } }
+    public string NameForSymbol(string symbol)
+    {
+        var normalized = Normalize(symbol);
+        lock (_lock)
+            return _rows.FirstOrDefault(r => r.Symbol.Equals(normalized, StringComparison.OrdinalIgnoreCase))?.Name ?? "";
+    }
 
     public void Start()
     {
@@ -56,7 +67,13 @@ sealed class StockMonitor
     public byte[] ToJson()
     {
         var stocks = Snapshot.Select(r => new { code = r.Code, price = r.Price, pct = r.Pct, up = r.Up }).ToArray();
-        return JsonSerializer.SerializeToUtf8Bytes(new { stocks, names_rev = NamesRev });
+        return JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            stocks,
+            names_rev = NamesRev,
+            page_size = RowsPerPage,
+            page_interval_ms = PageIntervalMs,
+        });
     }
 
     public void Refresh() => _ = Fetch();
@@ -64,7 +81,54 @@ sealed class StockMonitor
     static string Normalize(string symbol)
     {
         var value = symbol.Trim();
-        return value.Length <= 2 ? value.ToLowerInvariant() : value[..2].ToLowerInvariant() + value[2..].ToUpperInvariant();
+        if (value.Length <= 2) return value.ToLowerInvariant();
+        var prefix = value[..2].ToLowerInvariant();
+        var code = value[2..].ToUpperInvariant();
+        if (code.Length == 6 && code.All(char.IsDigit))
+        {
+            if (prefix == "sh" && (code.StartsWith("300") || code.StartsWith("301")
+                || code.StartsWith("002") || code.StartsWith("003") || code.StartsWith("399")))
+                prefix = "sz";
+            else if (prefix == "sz" && (code.StartsWith("600") || code.StartsWith("601")
+                || code.StartsWith("603") || code.StartsWith("605") || code.StartsWith("688")))
+                prefix = "sh";
+            else if ((prefix == "sh" || prefix == "sz")
+                && (code.StartsWith('4') || code.StartsWith('8')))
+                prefix = "bj";
+        }
+        return prefix + code;
+    }
+
+    public static bool TryNormalizeSymbol(string input, out string symbol, out string error)
+    {
+        var raw = input.Trim();
+        symbol = "";
+        error = "";
+        if (raw.Length == 6 && raw.All(char.IsDigit))
+        {
+            raw = raw.StartsWith('6') ? "sh" + raw
+                : raw.StartsWith('0') || raw.StartsWith('3') ? "sz" + raw
+                : raw.StartsWith('4') || raw.StartsWith('8') ? "bj" + raw
+                : raw;
+        }
+        if (raw.Length < 3)
+        {
+            error = "请输入带市场前缀的代码，例如 sh600519、hk00700、usAAPL。";
+            return false;
+        }
+        var prefix = raw[..2].ToLowerInvariant();
+        if (prefix is not ("sh" or "sz" or "bj" or "hk" or "us"))
+        {
+            error = "市场前缀只支持 sh、sz、bj、hk、us。";
+            return false;
+        }
+        symbol = Normalize(raw);
+        if (symbol.Length <= 2)
+        {
+            error = "股票代码不能为空。";
+            return false;
+        }
+        return true;
     }
 
     async Task Fetch()
@@ -111,8 +175,8 @@ sealed class StockMonitor
     {
         var key = string.Join("\n", rows.Select(r => r.Name));
         lock (_lock) if (key == _lastNamesKey) return;
-        var packed = new byte[NameW * NameH * MaxRows * 2];
-        for (var index = 0; index < rows.Length && index < MaxRows; index++)
+        var packed = new byte[NameW * NameH * MaxSymbols * 2];
+        for (var index = 0; index < rows.Length && index < MaxSymbols; index++)
         {
             using var bmp = new Bitmap(NameW, NameH);
             using (var graphics = Graphics.FromImage(bmp))
@@ -146,10 +210,10 @@ sealed class StockMonitor
             var f = line[(equal + 1)..].Trim('"', ';', '\r').Split('~');
             if (f.Length <= 32 || !TryNumber(f[3], out var price)
                 || !TryNumber(f[31], out var change) || !TryNumber(f[32], out var pct)) continue;
-            bySymbol[symbol] = new Row(DisplayCode(symbol), f[1], FormatPrice(price),
+            bySymbol[symbol] = new Row(Normalize(symbol), DisplayCode(symbol), f[1], FormatPrice(price),
                 $"{pct:+0.00;-0.00}%", change > 0 ? 1 : change < 0 ? -1 : 0);
         }
-        return order.Select(s => s.ToLowerInvariant()).Where(bySymbol.ContainsKey).Select(s => bySymbol[s]).Take(MaxRows).ToArray();
+        return order.Select(s => s.ToLowerInvariant()).Where(bySymbol.ContainsKey).Select(s => bySymbol[s]).Take(MaxSymbols).ToArray();
     }
 
     static Row[] ParseSina(string text, string[] order)
@@ -184,10 +248,10 @@ sealed class StockMonitor
                 change = price - previousClose;
                 pct = change * 100 / previousClose;
             }
-            bySymbol[symbol] = new Row(DisplayCode(symbol), name, FormatPrice(price),
+            bySymbol[symbol] = new Row(Normalize(symbol), DisplayCode(symbol), name, FormatPrice(price),
                 $"{pct:+0.00;-0.00}%", change > 0 ? 1 : change < 0 ? -1 : 0);
         }
-        return order.Where(bySymbol.ContainsKey).Select(s => bySymbol[s]).Take(MaxRows).ToArray();
+        return order.Where(bySymbol.ContainsKey).Select(s => bySymbol[s]).Take(MaxSymbols).ToArray();
     }
 
     static string SinaSymbol(string symbol)
