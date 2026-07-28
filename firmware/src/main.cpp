@@ -264,6 +264,8 @@ struct CodexStatus {
   int primaryResetMin = -1;
   float weeklyPct = -1;
   int weeklyResetMin = -1;
+  int resetCreditsAvailable = -1;
+  uint32_t resetCreditExpiresAt = 0;
   bool needsInput = false;
   uint32_t completionAt = 0;
 };
@@ -567,6 +569,8 @@ String pctText(float pct) {
 String lastQuota5hPct, lastQuota5hReset, lastQuotaWkPct, lastQuotaWkReset;
 bool lastQuotaSingle = false;
 String quotaResetText(int minutes);
+void epochToLocal(uint32_t utc, int offset, int &year, int &month, int &day,
+                  int &hour, int &minute, int &second, int &weekday);
 const uint16_t QUOTA_PANEL_COLOR = 0x1082;
 const uint16_t QUOTA_PANEL_BORDER = 0x29A5;
 
@@ -766,6 +770,16 @@ void drawDualPlanBadge(const String &plan, int top) {
   tft.drawRoundRect(left, top, width, 17, 4, color);
 }
 
+void drawDualResetCreditBadge(int top) {
+  if (codexStatus.resetCreditsAvailable < 0) return;
+  uint16_t color = codexStatus.resetCreditsAvailable > 0 ? TFT_GREEN : 0x9492;
+  tft.fillRoundRect(82, top, 24, 17, 4, TFT_BLACK);
+  tft.drawRoundRect(82, top, 24, 17, 4, color);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.drawString("R" + String(codexStatus.resetCreditsAvailable), 94, top + 8, 1);
+}
+
 void drawDualRow(const char *label, float pct, int resetMin, int y) {
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(0x7BEF, TFT_BLACK);
@@ -790,7 +804,8 @@ void drawDualSection(bool claude, bool force) {
   int weekReset = claude ? claudeStatus.sevenDayResetMin : codexStatus.weeklyResetMin;
   bool single = !claude && firstPct < 0;
   String key = plan + "|" + status + "|" + String(firstPct, 1) + "|" + String(firstReset)
-      + "|" + String(weekPct, 1) + "|" + String(weekReset) + "|" + String(single);
+      + "|" + String(weekPct, 1) + "|" + String(weekReset) + "|" + String(single)
+      + "|" + String(claude ? -1 : codexStatus.resetCreditsAvailable);
   String &lastKey = claude ? dualLastClaudeKey : dualLastCodexKey;
   if (!force && key == lastKey) return;
   lastKey = key;
@@ -804,6 +819,7 @@ void drawDualSection(bool claude, bool force) {
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(claude ? TFT_ORANGE : TFT_CYAN, TFT_BLACK);
   drawBoldString(claude ? "CLAUDE" : "CODEX", 31, top, 2, claude ? TFT_ORANGE : TFT_CYAN);
+  if (!claude) drawDualResetCreditBadge(top);
   drawDualPlanBadge(plan, top);
 
   if (single) {
@@ -840,6 +856,7 @@ uint16_t planColor(const String &plan) {
 }
 
 String lastPlanBadge;
+String lastResetCreditBadge;
 
 void drawPlanBadge(bool force) {
   String plan = currentPlan();
@@ -854,6 +871,30 @@ void drawPlanBadge(bool force) {
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(color, TFT_BLACK);
   tft.drawString(plan, 61 + w / 2, 38, 2);
+}
+
+void drawResetCreditBadge(bool force) {
+  String value = currentApp == APP_CODEX && codexStatus.resetCreditsAvailable >= 0
+      ? "RESET " + String(codexStatus.resetCreditsAvailable) : "";
+  String expiry;
+  if (codexStatus.resetCreditExpiresAt > 0) {
+    int year, month, day, hour, minute, second, weekday;
+    epochToLocal(codexStatus.resetCreditExpiresAt, bridgeUtcOffsetS,
+                 year, month, day, hour, minute, second, weekday);
+    expiry = String(month) + "/" + String(day);
+  }
+  String key = value + "|" + expiry;
+  if (!force && key == lastResetCreditBadge) return;
+  lastResetCreditBadge = key;
+  tft.fillRect(173, 26, 51, 28, TFT_BLACK);
+  if (value.length() == 0) return;
+  uint16_t color = codexStatus.resetCreditsAvailable > 0 ? TFT_GREEN : 0x9492;
+  tft.fillRoundRect(174, 28, 48, 24, 5, TFT_BLACK);
+  tft.drawRoundRect(174, 28, 48, 24, 5, color);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.drawString(value, 198, 34, 1);
+  if (expiry.length() > 0) tft.drawString(expiry, 198, 45, 1);
 }
 
 // Claude's ring percentage is only a real 5h quota. Unknown never becomes an
@@ -891,6 +932,7 @@ void drawActiveApp() {
   if (showingCd != CD_NONE) drawCountdown(true);
   drawAppLogo();
   drawPlanBadge(true);
+  drawResetCreditBadge(true);
 }
 
 // In-place refresh after a bridge poll: ring repaint + only the text that
@@ -914,6 +956,7 @@ void refreshActiveApp() {
     drawCountdown(false);
   }
   drawPlanBadge(false);
+  drawResetCreditBadge(false);
 }
 
 // Redraws just the ring (cheap) - used for status color animation ticks
@@ -2247,6 +2290,8 @@ bool parseStatusJson(const String &payload, bool applyAlertState = true) {
     codexStatus.primaryResetMin = x["primary_reset_min"] | -1;
     codexStatus.weeklyPct = x["weekly_pct"] | -1.0;
     codexStatus.weeklyResetMin = x["weekly_reset_min"] | -1;
+    codexStatus.resetCreditsAvailable = x["reset_credits_available"] | -1;
+    codexStatus.resetCreditExpiresAt = x["reset_credit_expires_at"] | 0UL;
     if (applyAlertState) {
       codexStatus.needsInput = x["needs_input"] | false;
       uint32_t incomingCompletionAt = x["completion_at"] | 0UL;

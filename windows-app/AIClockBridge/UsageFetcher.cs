@@ -18,6 +18,8 @@ class ProviderUsage
     public int? PrimaryResetMin;   // minutes until it resets
     public double? WeeklyPct;      // 7d / weekly window used %
     public int? WeeklyResetMin;
+    public int? ResetCreditsAvailable;  // account-owned Codex reset credits
+    public long? ResetCreditExpiresAt;   // earliest available credit, Unix seconds
     public string Error;
     public DateTime? FetchedAt;
     public bool RateLimited;
@@ -105,10 +107,15 @@ sealed class UsageFetcher
                 PrimaryResetMin = old.PrimaryResetMin,
                 WeeklyPct = old.WeeklyPct,
                 WeeklyResetMin = old.WeeklyResetMin,
+                ResetCreditsAvailable = old.ResetCreditsAvailable,
+                ResetCreditExpiresAt = old.ResetCreditExpiresAt,
                 FetchedAt = old.FetchedAt,
                 Error = fresh.Error,
             };
         }
+        if (fresh.ResetCreditsAvailable == old.ResetCreditsAvailable
+            && !fresh.ResetCreditExpiresAt.HasValue)
+            fresh.ResetCreditExpiresAt = old.ResetCreditExpiresAt;
         return fresh;
     }
 
@@ -182,6 +189,8 @@ sealed class UsageFetcher
         PrimaryResetMin = usage.PrimaryResetMin,
         WeeklyPct = usage.WeeklyPct,
         WeeklyResetMin = usage.WeeklyResetMin,
+        ResetCreditsAvailable = usage.ResetCreditsAvailable,
+        ResetCreditExpiresAt = usage.ResetCreditExpiresAt,
         FetchedAt = usage.FetchedAt,
     };
 
@@ -332,6 +341,13 @@ sealed class UsageFetcher
                 AssignCodexWindow(usage, w1, now, false);
             if (rateLimit.TryGetProperty("secondary_window", out var w2))
                 AssignCodexWindow(usage, w2, now, true);
+            if (doc.RootElement.TryGetProperty("rate_limit_reset_credits", out var resetCredits))
+                usage.ResetCreditsAvailable = IntOrNull(resetCredits, "available_count");
+            var resetCreditDetails = await FetchCodexResetCredits(
+                creds.Value.AccessToken, creds.Value.AccountId);
+            if (resetCreditDetails.Available.HasValue)
+                usage.ResetCreditsAvailable = resetCreditDetails.Available;
+            usage.ResetCreditExpiresAt = resetCreditDetails.ExpiresAt;
             usage.FetchedAt = DateTime.UtcNow;
         }
         catch
@@ -339,6 +355,45 @@ sealed class UsageFetcher
             usage.Error = "Codex 用量响应解析失败";
         }
         return usage;
+    }
+
+    static async Task<(int? Available, long? ExpiresAt)> FetchCodexResetCredits(
+        string accessToken, string accountId)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Get,
+            "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits");
+        req.Headers.TryAddWithoutValidation("Authorization", $"Bearer {accessToken}");
+        req.Headers.TryAddWithoutValidation("Accept", "application/json");
+        req.Headers.TryAddWithoutValidation("User-Agent", "AIClockBridge");
+        if (accountId != null)
+            req.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", accountId);
+        try
+        {
+            using var resp = await Http.SendAsync(req);
+            if (!resp.IsSuccessStatusCode) return (null, null);
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+            var available = IntOrNull(doc.RootElement, "available_count");
+            long? earliest = null;
+            if (doc.RootElement.TryGetProperty("credits", out var credits)
+                && credits.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var credit in credits.EnumerateArray())
+                {
+                    if (!string.Equals(StringOrNull(credit, "status"), "available",
+                        StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    var expires = StringOrNull(credit, "expires_at");
+                    if (!DateTimeOffset.TryParse(expires, out var parsed)) continue;
+                    var epoch = parsed.ToUnixTimeSeconds();
+                    if (!earliest.HasValue || epoch < earliest.Value) earliest = epoch;
+                }
+            }
+            return (available, earliest);
+        }
+        catch
+        {
+            return (null, null);
+        }
     }
 
     static void AssignCodexWindow(ProviderUsage usage, JsonElement window,
@@ -451,6 +506,14 @@ sealed class UsageFetcher
         if (obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(key, out var v)
             && v.ValueKind == JsonValueKind.String)
             return v.GetString();
+        return null;
+    }
+
+    static int? IntOrNull(JsonElement obj, string key)
+    {
+        if (obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(key, out var v)
+            && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var value))
+            return value;
         return null;
     }
 

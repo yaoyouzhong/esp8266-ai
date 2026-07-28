@@ -29,6 +29,8 @@ sealed class MirrorControl : Control
     public int? FiveHourResetMin;
     public double? WeeklyPct;
     public int? WeeklyResetMin;
+    public int? ResetCreditsAvailable;
+    public long? ResetCreditExpiresAt;
     public string Plan = "";
     public bool ShowingClaude = true;
     public bool DeviceOK;
@@ -189,6 +191,7 @@ sealed class MirrorControl : Control
         // app logo, top-left inside the ring (firmware draws it at 14,18 @40px)
         g.DrawImage(ShowingClaude ? ClaudeLogo : CodexLogo, new Rectangle(14, 18, 40, 40));
         DrawPlanBadge(g);
+        DrawResetCreditBadge(g);
 
         // Window, used percentage and reset countdown share each row, so the
         // existing pet keeps its size and position.
@@ -325,6 +328,32 @@ sealed class MirrorControl : Control
         g.DrawString(Plan, font, text, rect, fmt);
     }
 
+    void DrawResetCreditBadge(Graphics g)
+    {
+        if (ShowingClaude || !ResetCreditsAvailable.HasValue) return;
+        var color = ResetCreditsAvailable.Value > 0 ? Green : Color.FromArgb(145, 145, 145);
+        using var countFont = new Font("Consolas", 7, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var dateFont = new Font("Consolas", 7, FontStyle.Regular, GraphicsUnit.Pixel);
+        var rect = new RectangleF(174, 28, 48, 24);
+        using var path = RoundedRect(rect, 5);
+        using var fill = new SolidBrush(Color.FromArgb(28, color));
+        using var border = new Pen(color, 1);
+        using var text = new SolidBrush(color);
+        using var fmt = new StringFormat
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+        };
+        g.FillPath(fill, path);
+        g.DrawPath(border, path);
+        var expiry = ResetCreditDate(ResetCreditExpiresAt);
+        g.DrawString($"RESET {ResetCreditsAvailable.Value}", countFont, text,
+            new RectangleF(rect.X, rect.Y + 1, rect.Width, 11), fmt);
+        if (expiry.Length > 0)
+            g.DrawString(expiry, dateFont, text,
+                new RectangleF(rect.X, rect.Y + 11, rect.Width, 11), fmt);
+    }
+
     static Color PlanColor(string plan) => plan switch
     {
         "PRO" or "PRO LITE" => Color.FromArgb(255, 159, 10),
@@ -333,6 +362,12 @@ sealed class MirrorControl : Control
         "MAX" or "MAX 5X" or "MAX 20X" => Color.FromArgb(255, 125, 45),
         _ => Color.FromArgb(174, 174, 178),
     };
+
+    static string ResetCreditDate(long? epoch)
+    {
+        if (!epoch.HasValue || epoch.Value <= DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return "";
+        return DateTimeOffset.FromUnixTimeSeconds(epoch.Value).ToLocalTime().ToString("M/d");
+    }
 
     void DrawDomesticScene(Graphics g)
     {
@@ -482,13 +517,31 @@ sealed class MirrorControl : Control
             g.DrawLine(divider, 18, 121, 222, 121);
 
         void Section(string name, string plan, string status, double? firstPct, int? firstReset,
-                     double? weeklyPct, int? weeklyReset, float top, bool collapseFirst)
+                     double? weeklyPct, int? weeklyReset, float top, bool collapseFirst,
+                     int? resetCredits = null)
         {
             var statusColor = status == "working" ? Green
                 : status == "idle" ? Yellow : Color.FromArgb(90, 90, 90);
             using var statusBrush = new SolidBrush(statusColor);
             g.FillEllipse(statusBrush, 18, top + 4, 7, 7);
             g.DrawString(name, appFont, name == "CLAUDE" ? Brushes.Orange : Brushes.Cyan, 31, top);
+            if (resetCredits.HasValue)
+            {
+                var color = resetCredits.Value > 0 ? Green : Color.FromArgb(145, 145, 145);
+                var badge = new RectangleF(82, top, 24, 16);
+                using var badgePath = RoundedRect(badge, 4);
+                using var badgeFill = new SolidBrush(Color.FromArgb(28, color));
+                using var badgeBorder = new Pen(color, 1);
+                using var badgeText = new SolidBrush(color);
+                using var badgeFormat = new StringFormat
+                {
+                    Alignment = StringAlignment.Center,
+                    LineAlignment = StringAlignment.Center,
+                };
+                g.FillPath(badgeFill, badgePath);
+                g.DrawPath(badgeBorder, badgePath);
+                g.DrawString($"R{resetCredits.Value}", smallFont, badgeText, badge, badgeFormat);
+            }
             if (!string.IsNullOrWhiteSpace(plan))
             {
                 var color = PlanColor(plan);
@@ -540,7 +593,8 @@ sealed class MirrorControl : Control
         var codexSingle = !Dual.Codex.PrimaryPct.HasValue;
         Section("CODEX", Dual.Codex.Plan, Dual.Codex.Status,
             Dual.Codex.PrimaryPct, Dual.Codex.PrimaryResetMin,
-            Dual.Codex.WeeklyPct, Dual.Codex.WeeklyResetMin, 132, codexSingle);
+            Dual.Codex.WeeklyPct, Dual.Codex.WeeklyResetMin, 132, codexSingle,
+            Dual.Codex.ResetCreditsAvailable);
     }
 
     static string ResetText(int? minutes)
@@ -1135,6 +1189,8 @@ sealed class MirrorForm : Form
             _mirror.FiveHourResetMin = snap.Claude.FiveHourResetMin;
             _mirror.WeeklyPct = snap.Claude.SevenDayPct;
             _mirror.WeeklyResetMin = snap.Claude.SevenDayResetMin;
+            _mirror.ResetCreditsAvailable = null;
+            _mirror.ResetCreditExpiresAt = null;
             _mirror.Plan = snap.Claude.Plan;
             _mirror.NeedsInput = snap.Claude.NeedsInput;
         }
@@ -1145,6 +1201,8 @@ sealed class MirrorForm : Form
             _mirror.FiveHourResetMin = snap.Codex.PrimaryResetMin;
             _mirror.WeeklyPct = snap.Codex.WeeklyPct;
             _mirror.WeeklyResetMin = snap.Codex.WeeklyResetMin;
+            _mirror.ResetCreditsAvailable = snap.Codex.ResetCreditsAvailable;
+            _mirror.ResetCreditExpiresAt = snap.Codex.ResetCreditExpiresAt;
             _mirror.Plan = snap.Codex.Plan;
             _mirror.NeedsInput = snap.Codex.NeedsInput;
         }
