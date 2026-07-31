@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 
 namespace AIClockBridge;
@@ -31,6 +32,8 @@ sealed class UsageFetcher
     static readonly string CachePath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "AIClockBridge", "usage-cache.json");
+    static readonly string CodexAuthPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "auth.json");
     static readonly JsonSerializerOptions CacheJson = new() { IncludeFields = true };
 
     readonly object _lock = new();
@@ -102,7 +105,11 @@ sealed class UsageFetcher
         {
             return new ProviderUsage
             {
-                Plan = fresh.Plan,
+                // A credential/JWT plan is only a fallback hint. When the
+                // quota request fails, keep the last plan confirmed together
+                // with the cached quota instead of mixing fresh unverified
+                // identity data with stale verified usage data.
+                Plan = string.IsNullOrEmpty(old.Plan) ? fresh.Plan : old.Plan,
                 PrimaryPct = old.PrimaryPct,
                 PrimaryResetMin = old.PrimaryResetMin,
                 WeeklyPct = old.WeeklyPct,
@@ -294,37 +301,52 @@ sealed class UsageFetcher
     {
         var usage = new ProviderUsage();
         var creds = CodexCredentials();
+        if (creds == null && File.Exists(CodexAuthPath))
+        {
+            await TryRefreshCodexCredentials();
+            creds = CodexCredentials();
+        }
         if (creds == null)
         {
-            usage.Error = "未找到 Codex 登录凭据 (~/.codex/auth.json)";
+            usage.Error = File.Exists(CodexAuthPath)
+                ? "Codex CLI 登录已过期，请运行 codex login 重新登录"
+                : "未找到 Codex CLI 登录凭据（~/.codex/auth.json）";
             return usage;
         }
-        usage.Plan = creds.Value.Plan;
-        using var req = new HttpRequestMessage(HttpMethod.Get,
-            "https://chatgpt.com/backend-api/wham/usage");
-        req.Headers.TryAddWithoutValidation("Authorization", $"Bearer {creds.Value.AccessToken}");
-        req.Headers.TryAddWithoutValidation("Accept", "application/json");
-        req.Headers.TryAddWithoutValidation("User-Agent", "AIClockBridge");
-        if (creds.Value.AccountId != null)
-            req.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", creds.Value.AccountId);
 
-        string body;
-        int code;
-        try
+        string body = null;
+        int code = 0;
+        for (var attempt = 0; attempt < 2; attempt++)
         {
-            using var resp = await Http.SendAsync(req);
-            code = (int)resp.StatusCode;
-            body = await resp.Content.ReadAsStringAsync();
-        }
-        catch
-        {
-            usage.Error = "Codex 用量请求失败";
-            return usage;
+            usage.Plan = creds.Value.Plan;
+            using var req = new HttpRequestMessage(HttpMethod.Get,
+                "https://chatgpt.com/backend-api/wham/usage");
+            req.Headers.TryAddWithoutValidation("Authorization", $"Bearer {creds.Value.AccessToken}");
+            req.Headers.TryAddWithoutValidation("Accept", "application/json");
+            req.Headers.TryAddWithoutValidation("User-Agent", "AIClockBridge");
+            if (creds.Value.AccountId != null)
+                req.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", creds.Value.AccountId);
+            try
+            {
+                using var resp = await Http.SendAsync(req);
+                code = (int)resp.StatusCode;
+                body = await resp.Content.ReadAsStringAsync();
+            }
+            catch
+            {
+                usage.Error = "Codex 用量请求失败";
+                return usage;
+            }
+            if (code != 401 && code != 403) break;
+            if (attempt != 0 || !await TryRefreshCodexCredentials()) break;
+            creds = CodexCredentials();
+            if (creds == null) break;
         }
         if (code < 200 || code > 299)
         {
             usage.Error = code == 401 || code == 403
-                ? "Codex 凭据过期，运行 codex 重新登录" : $"Codex 用量接口 HTTP {code}";
+                ? "Codex CLI 登录已过期，请运行 codex login 重新登录"
+                : $"Codex 用量接口 HTTP {code}";
             return usage;
         }
         try
@@ -421,16 +443,14 @@ sealed class UsageFetcher
 
     static (string AccessToken, string AccountId, string Plan)? CodexCredentials()
     {
-        var path = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "auth.json");
         try
         {
-            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            using var doc = JsonDocument.Parse(File.ReadAllText(CodexAuthPath));
             if (!doc.RootElement.TryGetProperty("tokens", out var tokens)
                 || !tokens.TryGetProperty("access_token", out var accessEl)
                 || accessEl.ValueKind != JsonValueKind.String) return null;
             var access = accessEl.GetString();
-            if (string.IsNullOrEmpty(access)) return null;
+            if (string.IsNullOrEmpty(access) || !JwtUsable(access)) return null;
             string accountId = null;
             string plan = null;
             if (tokens.TryGetProperty("account_id", out var acc) && acc.ValueKind == JsonValueKind.String)
@@ -446,6 +466,123 @@ sealed class UsageFetcher
         catch
         {
             return null;
+        }
+    }
+
+    /// Codex Desktop uses externally managed, memory-only credentials. The
+    /// standalone CLI has its own managed auth.json. Ask the official CLI app
+    /// server to refresh that file instead of implementing OAuth refresh here.
+    static async Task<bool> TryRefreshCodexCredentials()
+    {
+        var executable = FindCodexExecutable();
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = executable,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            },
+        };
+        process.StartInfo.ArgumentList.Add("app-server");
+        process.StartInfo.ArgumentList.Add("--listen");
+        process.StartInfo.ArgumentList.Add("stdio://");
+        try
+        {
+            if (!process.Start()) return false;
+            _ = process.StandardError.ReadToEndAsync();
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            await WriteRpc(process, new
+            {
+                id = 1,
+                method = "initialize",
+                @params = new
+                {
+                    clientInfo = new { name = "ai-clock-bridge", version = "1.0" },
+                },
+            }, timeout.Token);
+            if (!await ReadRpcSuccess(process, 1, timeout.Token)) return false;
+            await WriteRpc(process, new { method = "initialized", @params = new { } }, timeout.Token);
+            await WriteRpc(process, new
+            {
+                id = 2,
+                method = "account/read",
+                @params = new { refreshToken = true },
+            }, timeout.Token);
+            return await ReadRpcSuccess(process, 2, timeout.Token);
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            try
+            {
+                if (!process.HasExited) process.Kill(entireProcessTree: true);
+            }
+            catch
+            {
+                // The short-lived helper may already have exited.
+            }
+        }
+    }
+
+    static async Task WriteRpc(Process process, object message, CancellationToken token)
+    {
+        await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(message));
+        await process.StandardInput.FlushAsync(token);
+    }
+
+    static async Task<bool> ReadRpcSuccess(Process process, int id, CancellationToken token)
+    {
+        while (true)
+        {
+            var line = await process.StandardOutput.ReadLineAsync(token);
+            if (line == null) return false;
+            try
+            {
+                using var doc = JsonDocument.Parse(line);
+                if (!doc.RootElement.TryGetProperty("id", out var responseId)
+                    || !responseId.TryGetInt32(out var value) || value != id)
+                    continue;
+                return doc.RootElement.TryGetProperty("result", out _)
+                    && !doc.RootElement.TryGetProperty("error", out _);
+            }
+            catch (JsonException)
+            {
+                // Ignore non-protocol output and continue until the timeout.
+            }
+        }
+    }
+
+    static string FindCodexExecutable()
+    {
+        var local = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "OpenAI", "Codex", "bin", "codex.exe");
+        return File.Exists(local) ? local : "codex.exe";
+    }
+
+    static bool JwtUsable(string jwt)
+    {
+        var parts = jwt.Split('.');
+        if (parts.Length < 2) return false;
+        var b64 = parts[1].Replace('-', '+').Replace('_', '/');
+        while (b64.Length % 4 != 0) b64 += "=";
+        try
+        {
+            using var doc = JsonDocument.Parse(Convert.FromBase64String(b64));
+            if (!doc.RootElement.TryGetProperty("exp", out var exp)
+                || !exp.TryGetInt64(out var expiresAt)) return false;
+            return DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeSeconds() < expiresAt;
+        }
+        catch
+        {
+            return false;
         }
     }
 

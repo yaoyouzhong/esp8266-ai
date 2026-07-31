@@ -49,7 +49,10 @@ Claude 与 Codex 的单页、双额度页和 Windows 镜像均显示同样的套
 - 数据来源同 Mac 版：`%USERPROFILE%\.claude\projects` / `%USERPROFILE%\.codex\sessions`
   的 JSONL 日志 + 各自官方用量接口（凭据读
   `%USERPROFILE%\.claude\.credentials.json` 和 `%USERPROFILE%\.codex\auth.json`，
-  token 只发给各自官方 API）
+  token 只发给各自官方 API）。Codex access token 临近过期或额度接口返回 401 时，
+  桥接程序通过 Codex CLI 官方 App Server 主动刷新后重试。Codex Desktop 登录凭据由
+  桌面端在内存中独立管理，不能替代 CLI 登录；若 CLI 刷新凭据也已失效，运行一次
+  `codex login` 即可恢复，后续由 CLI 自动续期
 - 音乐页读系统级 Now Playing（WinRT `GlobalSystemMediaTransportControlsSessionManager`，
   Spotify / 浏览器 / 本地播放器都能识别）；网速取物理网卡（以太网/WiFi）字节计数，
   4Hz 采样，排除 VPN/虚拟网卡

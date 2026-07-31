@@ -12,7 +12,9 @@
   OAuth 登录凭据，直接调各自官方用量接口（做法与
   [CodexBar](https://github.com/steipete/CodexBar) 相同，token 只发给各自官方 API）：
   - Claude：Keychain 里的 `Claude Code-credentials` → `api.anthropic.com/api/oauth/usage`
-  - Codex：`~/.codex/auth.json` → `chatgpt.com/backend-api/wham/usage`
+  - Codex：`~/.codex/auth.json` → `chatgpt.com/backend-api/wham/usage`；
+    access token 过期或返回 401 时，先通过 Codex CLI App Server 的
+    `account/read(refreshToken=true)` 执行官方刷新，再重试额度接口
 
 架构：`mac-app/` 是原始的 **Swift 原生菜单栏 app**；`windows-app/` 是 C# 托盘移植版，
 并扩展了 USB 直连、天气、股票、国产模型额度和 CPU/内存监控。两者都能读取本地状态并提供
