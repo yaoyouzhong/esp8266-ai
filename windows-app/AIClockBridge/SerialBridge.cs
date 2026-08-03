@@ -58,6 +58,7 @@ sealed class SerialBridge : IDisposable
     int _lastWeatherTextRev = -1;
     readonly bool _telemetryEnabled;
     volatile bool _transferActive;
+    volatile bool _hostGoingAway;
     MemoryStream _download;
     TaskCompletionSource<byte[]> _downloadWaiter;
     ushort _downloadTransfer;
@@ -87,7 +88,7 @@ sealed class SerialBridge : IDisposable
 
     void Scan()
     {
-        if (_port?.IsOpen == true || _scanning) return;
+        if (_hostGoingAway || _port?.IsOpen == true || _scanning) return;
         _scanning = true;
         try
         {
@@ -337,6 +338,8 @@ sealed class SerialBridge : IDisposable
             Ip = Str(root, "ip"), Ssid = Str(root, "ssid"), Bridge = Str(root, "bridge"),
             Mode = Str(root, "mode", "auto"), Effective = Str(root, "effective", "auto"),
             Showing = Str(root, "showing"), LastUpdateS = Int(root, "last_update_s", -1),
+            HostOffline = Bool(root, "host_offline"),
+            TimeSource = Str(root, "time_source", "none"), NtpSynced = Bool(root, "ntp_synced"),
             SpriteRev = Int(root, "sprite_rev"), Brightness = Int(root, "brightness", 100),
             StockPage = Int(root, "stock_page"),
             StockPageCount = Int(root, "stock_page_count", 1),
@@ -363,6 +366,7 @@ sealed class SerialBridge : IDisposable
 
     void Push()
     {
+        if (_hostGoingAway) return;
         if (_port?.IsOpen != true) return;
         if (!Connected)
         {
@@ -756,10 +760,25 @@ sealed class SerialBridge : IDisposable
         _deviceInfo = null;
     }
 
+    public void NotifyHostGoingAway()
+    {
+        if (_hostGoingAway) return;
+        _hostGoingAway = true;
+        // Repeat the tiny control frame: Windows can terminate processes very
+        // quickly during shutdown, and the first UART write may still be in a
+        // driver buffer. Firmware also has an 8-second timeout as a backstop.
+        for (var i = 0; i < 3; i++)
+        {
+            Send("host_going_away");
+            if (i < 2) Thread.Sleep(20);
+        }
+    }
+
     public void Dispose()
     {
         _scanTimer.Dispose();
         _pushTimer.Dispose();
+        NotifyHostGoingAway();
         ClosePort();
     }
 

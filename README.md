@@ -60,6 +60,8 @@ USB 桥接也没有连上 WiFi，才会开启热点 **`AI-Clock-Setup`**：手�
 - **Windows**：`AIClockBridge-*-Windows-x64.exe`，双击即用
 
 桥接程序常驻菜单栏 / 托盘。Windows 连接 USB 数据线后直接通过 COM 握手，不要求电脑和设备在局域网互通；macOS 和 Windows 的无线回退会自动发现并配对同一局域网内的设备。
+Windows 可在「桥接服务」启用登录后自动启动。电脑关机、重启或桥接离线时，若 USB 仍供电，设备会自动切到带离线标记的独立时钟；桥接恢复后回到原页面。
+独立时钟会通过设备自身保存的家庭 Wi-Fi 直接访问阿里云、腾讯及公共 NTP 服务器校时，不依赖 Windows 桥接 App；网络暂时中断时从最后一次有效时间继续运行。
 
 <p align="center">
   <img src="docs/images/working.jpg" width="640" alt="工作演示">

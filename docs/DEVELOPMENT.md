@@ -30,7 +30,14 @@ Windows 版另有 USB 优先传输，CH340 串口为 460800：小型控制帧以
 `completion_seq=1` 被设备误判为上一进程的旧事件。该帧也避免完整状态 JSON 在屏幕刷新或
 图片传输期间因 ESP8266 UART 缓冲区拥塞而延迟或丢失。
 USB 覆盖状态、网速、完整音乐画面、天气、股票、设备控制、GIF 上传和镜像精灵读取；连续 8 秒未收到
-USB 心跳时固件自动回退 HTTP。图片在设备端边收边画，GIF 边收边写 LittleFS，均不缓存
+USB 心跳时固件自动回退 HTTP。Windows 正常退出或收到系统关机事件时连续发送 3 次
+`host_going_away` 控制帧；固件立即临时切到 `screensaver` 独立时钟，心跳超时是同一行为的
+兜底。该临时状态不修改持久化的显示模式，新桥接的 `hello` + `status` 到达后自动恢复。
+独立时钟通过 `configTime()` 异步连接 `ntp.aliyun.com`、`ntp.tencent.com` 和 `pool.ntp.org`；
+时间源优先级为新鲜桥接时间、NTP、最后一次桥接/天气时间续走。`/api/info` 与 USB `info`
+通过 `time_source=bridge|ntp|holdover|none`、`ntp_synced` 暴露诊断状态。Windows 下发的
+`local_utc_offset_s` 保存到 LittleFS，首次启动默认为 UTC+8。
+图片在设备端边收边画，GIF 边收边写 LittleFS，均不缓存
 整个文件到 ESP8266 RAM。
 天气状态中的 `header_center_x` 与 `range_y` 由 Windows 根据中文标题位图的实际像素边界计算，
 设备据此让高低温随地区标题的宽度和字号同步对齐。
@@ -390,7 +397,8 @@ JSONL 检测只读取桥接
   沿用旧值，偶尔菜单里额度会显示为几分钟前的数据。
 - 国产模型 `tokens_today` 目前不是厂商账号全量统计；跨应用的当日 Credits/Token 用量仍需
   接入厂商账号侧用量趋势接口。
-- Mac 端未内置开机自启 LaunchAgent；Windows 可在托盘「桥接服务」里启用当前用户自启。
+- Mac 端未内置开机自启 LaunchAgent；Windows 可在托盘「桥接服务」里启用当前用户登录计划任务，
+  任务延迟 10 秒启动并在失败后最多按 1 分钟间隔重试 3 次。
 - 改**默认**编译进固件的动画（`firmware/include/img/claude_sprite.h` /
   `codex_sprite.h`）仍可用 `tools/convert_sprites.py` 生成新的 `.h` 后 `pio run -t upload`；
   日常换形象用菜单栏 petdex 选择器或设备网页即可，无需烧录。

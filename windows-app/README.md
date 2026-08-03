@@ -96,8 +96,15 @@ dotnet publish -c Release -r win-x64 --self-contained false
 App 会优先按 CH340 的 VID/PID 筛选 COM 口，再用协议握手确认设备；烧录固件前应先退出
 桥接 App，避免 COM 口被占用。
 
-**开机自启**：右键托盘图标，勾选「随 Windows 启动」。App 使用当前用户启动项，
-不需要管理员权限；再次点击即可关闭。
+**开机自启**：右键托盘图标，勾选「随 Windows 启动」。App 为当前用户创建登录计划任务，
+登录后延迟 10 秒启动，启动失败时最多重试 3 次（每分钟一次），不需要管理员权限；再次点击
+即可关闭。诊断记录位于 `%APPDATA%\AIClockBridge\startup.log`。
+
+Windows 关机、重启或桥接退出时，App 会先通知设备进入独立时钟；通知未送达时，固件会在
+USB 心跳超过 8 秒后兜底切换。屏幕右下角的琥珀色 `PC OFF` 徽标表示电脑端离线，桥接恢复后自动
+回到原先配置的页面。若电脑关闭了 USB 供电，设备会随之熄屏。
+独立时钟在家庭 Wi-Fi 可用时直接使用 NTP 校时；时间源优先级为 Windows 桥接、NTP、最后一次
+有效时间续走。时区取 Windows 最近下发的 UTC 偏移并保存到设备，首次使用默认为 UTC+8。
 
 **Hooks 实时状态**（可选，同主 README §7）：Claude Code / Codex 的 hooks 往
 `http://127.0.0.1:8765/event` POST 事件即可，Windows 下 curl 自带。

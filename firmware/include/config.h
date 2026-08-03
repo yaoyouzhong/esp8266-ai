@@ -12,6 +12,7 @@
 // ---- WiFiManager ----
 #define WIFI_PORTAL_AP_NAME "AI-Clock-Setup"
 #define WIFI_CONFIG_FILE "/bridge_host.txt"
+#define UTC_OFFSET_FILE "/utc_offset.txt"
 
 // ---- Backlight ----
 #define BRIGHTNESS_FILE "/brightness.txt"

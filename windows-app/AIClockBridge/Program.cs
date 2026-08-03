@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using Microsoft.Win32;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 
@@ -17,6 +18,11 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        var startupLaunch = args.Length >= 1 && args[0] == "--startup-launch";
+        if (startupLaunch) StartupManager.Log($"launch requested pid={Environment.ProcessId}");
+        Application.ThreadException += (_, e) => StartupManager.Log($"UI crash: {e.Exception}");
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            StartupManager.Log($"fatal crash: {e.ExceptionObject}");
         if (args.Length >= 1 && args[0] == "--quota-auth")
         {
             ApplicationConfiguration.Initialize();
@@ -30,9 +36,17 @@ static class Program
         }
         if (args.Length >= 2 && args[0] == "--startup")
         {
-            if (args[1] == "enable") StartupManager.SetEnabled(true);
-            else if (args[1] == "disable") StartupManager.SetEnabled(false);
-            Console.WriteLine(StartupManager.IsEnabled ? "enabled" : "disabled");
+            try
+            {
+                if (args[1] == "enable") StartupManager.SetEnabled(true);
+                else if (args[1] == "disable") StartupManager.SetEnabled(false);
+                Console.WriteLine(StartupManager.IsEnabled ? "enabled" : "disabled");
+            }
+            catch (Exception e)
+            {
+                StartupManager.Log($"startup registration failed: {e}");
+                Environment.ExitCode = 1;
+            }
             return;
         }
         if (args.Length >= 2 && args[0] == "--test-pet-download")
@@ -55,6 +69,11 @@ static class Program
             Environment.Exit(TestUsbAlerts().GetAwaiter().GetResult());
             return;
         }
+        if (args.Length >= 1 && args[0] == "--test-usb-host-away")
+        {
+            Environment.Exit(TestUsbHostAway().GetAwaiter().GetResult());
+            return;
+        }
         if (args.Length >= 1 && args[0] == "--test-quota-window")
         {
             Environment.Exit(TestQuotaWindow());
@@ -62,9 +81,15 @@ static class Program
         }
 
         using var singleInstance = new Mutex(true, @"Local\AIClockBridge.SingleInstance", out var isFirstInstance);
-        if (!isFirstInstance) return;
+        if (!isFirstInstance)
+        {
+            if (startupLaunch) StartupManager.Log("startup skipped: another instance is already running");
+            return;
+        }
 
         ApplicationConfiguration.Initialize();
+        try { StartupManager.EnsureCurrentRegistration(); }
+        catch (Exception e) { StartupManager.Log($"startup registration migration failed: {e.Message}"); }
 
         var service = new StatusService();
         service.CodexCompletion = () => System.Media.SystemSounds.Asterisk.Play();
@@ -92,6 +117,8 @@ static class Program
         var weather = new WeatherMonitor();
         weather.Start();
         using var serialBridge = new SerialBridge(service, netMonitor, nowPlaying, stocks, weather);
+        SessionEndingEventHandler sessionEnding = (_, _) => serialBridge.NotifyHostGoingAway();
+        SystemEvents.SessionEnding += sessionEnding;
         service.UrgentUpdate = serialBridge.PushStatusNow;
         DeviceClient.Usb = serialBridge;
 
@@ -174,7 +201,14 @@ static class Program
 
         var context = new TrayAppContext(service, usage, domesticUsage, netMonitor, nowPlaying, stocks, weather, Port);
         usage.StartAutoRefresh();
-        Application.Run(context);
+        if (startupLaunch) StartupManager.Log($"ready pid={Environment.ProcessId}");
+        try { Application.Run(context); }
+        finally
+        {
+            SystemEvents.SessionEnding -= sessionEnding;
+            serialBridge.NotifyHostGoingAway();
+            StartupManager.Log("bridge stopped");
+        }
     }
 
     static async Task<int> TestPet(string[] args)
@@ -469,6 +503,41 @@ static class Program
             usb.ResetSprite("claude");
             return 1;
         }
+    }
+
+    static async Task<int> TestUsbHostAway()
+    {
+        ApplicationConfiguration.Initialize();
+        using var usb = new SerialBridge(new StatusService(), new NetSpeedMonitor(),
+            new NowPlayingMonitor(), telemetryEnabled: false);
+        for (var i = 0; i < 200 && !usb.Connected; i++) await Task.Delay(100);
+        if (!usb.Connected)
+        {
+            Console.Error.WriteLine("[test-usb-host-away] device handshake timeout");
+            return 1;
+        }
+        for (var i = 0; i < 30 && usb.DeviceInfo == null; i++)
+        {
+            usb.RequestInfo();
+            await Task.Delay(100);
+        }
+        var configured = usb.DeviceInfo?.Mode ?? "";
+        usb.NotifyHostGoingAway();
+        for (var i = 0; i < 30; i++)
+        {
+            usb.RequestInfo();
+            await Task.Delay(100);
+            if (usb.DeviceInfo?.HostOffline == true && usb.DeviceInfo.Effective == "screensaver")
+            {
+                Console.Error.WriteLine(
+                    $"[test-usb-host-away] verified configured={configured}, effective=screensaver, " +
+                    $"host_offline=true, time_source={usb.DeviceInfo.TimeSource}, ntp_synced={usb.DeviceInfo.NtpSynced}");
+                return 0;
+            }
+        }
+        Console.Error.WriteLine(
+            $"[test-usb-host-away] failed effective={usb.DeviceInfo?.Effective ?? "--"}, host_offline={usb.DeviceInfo?.HostOffline}");
+        return 1;
     }
 
     static async Task<int> TestUsbAlerts()

@@ -58,6 +58,8 @@ Download from [Releases](https://github.com/pengchujin/esp8266-ai/releases/lates
 - **Windows**: `AIClockBridge-*-Windows-x64.exe`, just double-click
 
 The bridge lives in your menu bar / tray. Windows uses direct CH340 serial transport when the USB data cable is attached and falls back to LAN automatically. macOS uses LAN discovery and pairing.
+Windows can launch the bridge automatically after sign-in. When the PC shuts down, restarts, or the bridge goes offline while USB power remains available, the device switches to a standalone clock with an offline marker and restores the configured page when the bridge returns.
+The standalone clock uses its saved home Wi-Fi to synchronize directly against Alibaba, Tencent and public NTP servers without the Windows bridge, then holds over from the last trusted time during temporary network outages.
 
 <p align="center">
   <img src="docs/images/working.jpg" width="640" alt="In action">

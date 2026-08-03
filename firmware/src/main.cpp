@@ -15,6 +15,7 @@
 #include <ArduinoJson.h>
 #include <TFT_eSPI.h>
 #include <AnimatedGIF.h>
+#include <time.h>
 
 #include "config.h"
 #include "img/claude_sprite.h"
@@ -118,8 +119,13 @@ void startCodexCompletionAlert() {
 bool statusMusicPlaying = false;
 DisplayMode lastEffectiveMode = MODE_AUTO;
 uint32_t bridgeEpochUtc = 0;
-int bridgeUtcOffsetS = 0;
+// China is the safe first-boot default for this device. The bridge overwrites
+// and persists the actual Windows offset, so other regions remain supported.
+int bridgeUtcOffsetS = 8 * 3600;
 unsigned long bridgeClockSyncMs = 0;
+bool ntpStarted = false;
+bool ntpSynced = false;
+const time_t NTP_VALID_AFTER = 1704067200; // 2024-01-01 UTC
 int screenSaverOldX = -1, screenSaverOldY = -1, screenSaverOldW = 0, screenSaverOldH = 0;
 long screenSaverLastTick = -1;
 
@@ -308,6 +314,7 @@ bool everPolled = false;
 // logs. Only lines with this prefix are parsed as protocol messages.
 const char *USB_FRAME_PREFIX = "@AICLOCK ";
 const unsigned long USB_STALE_MS = 8000;
+bool hostGoingAway = false;
 unsigned long lastUsbStatusMs = 0;
 bool everUsbStatus = false;
 bool decodeGifToBin(const char *gifPath, const char *binPath, int targetW, int targetH);
@@ -601,6 +608,40 @@ void drawQuotaRow(const char *label, float pct, int resetMin, int y, bool force,
     tft.fillRect(154, y + 1, 63, 19, QUOTA_PANEL_COLOR);
     tft.setTextDatum(MC_DATUM);
     drawBoldString(reset, 187, y + 11, 2, TFT_CYAN);
+  }
+}
+
+void loadUtcOffset() {
+  if (!LittleFS.exists(UTC_OFFSET_FILE)) return;
+  File f = LittleFS.open(UTC_OFFSET_FILE, "r");
+  if (!f) return;
+  int value = f.readStringUntil('\n').toInt();
+  f.close();
+  if (value >= -12 * 3600 && value <= 14 * 3600) bridgeUtcOffsetS = value;
+}
+
+void saveUtcOffset(int value) {
+  if (value == bridgeUtcOffsetS) return;
+  bridgeUtcOffsetS = value;
+  File f = LittleFS.open(UTC_OFFSET_FILE, "w");
+  if (!f) return;
+  f.println(value);
+  f.close();
+}
+
+void serviceNtp() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (!ntpStarted) {
+    // configTime is asynchronous on ESP8266; never block display/USB startup
+    // while DNS or an NTP server is unavailable.
+    configTime(0, 0, "ntp.aliyun.com", "ntp.tencent.com", "pool.ntp.org");
+    ntpStarted = true;
+    Serial.println("[ntp] synchronization started");
+  }
+  time_t now = time(nullptr);
+  if (!ntpSynced && now >= NTP_VALID_AFTER) {
+    ntpSynced = true;
+    Serial.printf("[ntp] synchronized epoch=%lu\n", (unsigned long)now);
   }
 }
 
@@ -1783,9 +1824,23 @@ void epochToLocal(uint32_t utc, int offset, int &year, int &month, int &day, int
 }
 
 uint32_t currentBridgeUtc() {
-  if (bridgeEpochUtc > 0) return bridgeEpochUtc + (millis() - bridgeClockSyncMs) / 1000;
+  uint32_t bridgeNow = bridgeEpochUtc > 0
+    ? bridgeEpochUtc + (millis() - bridgeClockSyncMs) / 1000 : 0;
+  if (bridgeNow > 0 && !hostGoingAway && !bridgeStale()) return bridgeNow;
+  time_t ntpNow = time(nullptr);
+  if (ntpNow >= NTP_VALID_AFTER) return (uint32_t)ntpNow;
+  // Hold over from the last trusted source when the internet is temporarily
+  // unavailable. ESP8266 millis() may drift, but the clock keeps progressing.
+  if (bridgeNow > 0) return bridgeNow;
   if (weatherStatus.loaded) return weatherStatus.epochUtc + (millis() - weatherSyncMs) / 1000;
   return 0;
+}
+
+const char *currentTimeSource() {
+  if (bridgeEpochUtc > 0 && !hostGoingAway && !bridgeStale()) return "bridge";
+  if (time(nullptr) >= NTP_VALID_AFTER) return "ntp";
+  if (bridgeEpochUtc > 0 || weatherStatus.loaded) return "holdover";
+  return "none";
 }
 
 void drawWeekdayGlyph(int glyph, int x, int y, uint16_t color, int size = 18) {
@@ -1819,6 +1874,18 @@ void drawScreenSaverDigit(int digit, int x, int y, uint16_t color) {
   if (mask & 0x40) tft.fillRoundRect(x + t, y + half - t / 2, w - t * 2, t, 3, color);
 }
 
+void drawHostOfflineMark() {
+  const int w = 56, h = 18;
+  const int x = SCREEN_W - w - 3, y = SCREEN_H - h - 3;
+  tft.fillRect(x - 1, y - 1, w + 2, h + 2, TFT_BLACK);
+  if (!(hostGoingAway || bridgeStale())) return;
+  const uint16_t color = TFT_ORANGE;
+  tft.drawRoundRect(x, y, w, h, 3, color);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.drawString("PC OFF", x + w / 2, y + h / 2, 1);
+}
+
 void drawScreenSaver(bool force) {
   uint32_t utc = currentBridgeUtc();
   if (force) {
@@ -1833,11 +1900,13 @@ void drawScreenSaver(bool force) {
       tft.drawString("AI CLOCK", SCREEN_W / 2, SCREEN_H / 2, 4);
       screenSaverOldX = 0;
     }
+    drawHostOfflineMark();
     return;
   }
 
   int year, month, day, hour, minute, second, weekday;
-  int offset = bridgeEpochUtc > 0 ? bridgeUtcOffsetS : weatherStatus.utcOffsetS;
+  int offset = bridgeEpochUtc > 0 || !weatherStatus.loaded
+    ? bridgeUtcOffsetS : weatherStatus.utcOffsetS;
   epochToLocal(utc, offset, year, month, day, hour, minute, second, weekday);
   long refreshTick = utc / 5;
   if (!force && refreshTick == screenSaverLastTick) return;
@@ -1856,7 +1925,8 @@ void drawScreenSaver(bool force) {
   int groupW = max(timeW, dateLineW);
   int groupH = calendarTop + dateTextHeight;
   int rangeX = max(1, SCREEN_W - groupW - 12);
-  int rangeY = max(1, SCREEN_H - groupH - 24);
+  // Keep a fixed bottom status lane clear for the explicit PC OFF badge.
+  int rangeY = max(1, SCREEN_H - groupH - 38);
   uint32_t motionTick = utc / 5;
   int phaseX = (motionTick * 2) % (rangeX * 2);
   int phaseY = motionTick % (rangeY * 2);
@@ -1892,6 +1962,7 @@ void drawScreenSaver(bool force) {
   screenSaverOldW = groupW;
   screenSaverOldH = groupH;
   screenSaverLastTick = refreshTick;
+  drawHostOfflineMark();
 }
 
 void drawWeatherDigit(int digit, int x, int y, uint16_t color) {
@@ -2317,7 +2388,9 @@ bool parseStatusJson(const String &payload, bool applyAlertState = true) {
   uint32_t statusEpoch = doc["ts"] | 0UL;
   if (statusEpoch > 0) {
     bridgeEpochUtc = statusEpoch;
-    bridgeUtcOffsetS = doc["local_utc_offset_s"] | 0;
+    int incomingOffset = doc["local_utc_offset_s"] | bridgeUtcOffsetS;
+    if (incomingOffset >= -12 * 3600 && incomingOffset <= 14 * 3600)
+      saveUtcOffset(incomingOffset);
     bridgeClockSyncMs = millis();
   }
   return true;
@@ -2327,6 +2400,10 @@ bool parseStatusJson(const String &payload, bool applyAlertState = true) {
 // the pet so its border can flash red at you), otherwise audio promotes to the
 // music page.
 DisplayMode effectiveMode() {
+  // A dead Windows host must never leave a stale quota/weather/stock frame on
+  // screen. Keep the user's configured mode intact and temporarily render the
+  // standalone clock until a bridge heartbeat returns.
+  if (hostGoingAway || bridgeStale()) return MODE_SCREENSAVER;
   if (displayMode == MODE_SCREENSAVER && screenSaverPreview) return MODE_SCREENSAVER;
   if (domesticStatus.needsInput) return MODE_DOMESTIC;
   if (claudeStatus.needsInput || codexStatus.needsInput || completionAlertActive()) return MODE_AUTO;
@@ -2362,6 +2439,7 @@ void pollBridge() {
   if (code == HTTP_CODE_OK) {
     String payload = http.getString();
     if (parseStatusJson(payload)) {
+      hostGoingAway = false;
       lastSuccessMs = millis();
       everPolled = true;
       Serial.printf("[bridge] claude=%s tok=%ld | codex=%s tok=%ld primary=%.0f%%\n",
@@ -2514,6 +2592,9 @@ String deviceInfoJson() {
   doc["bridge"] = bridgeHost;
   doc["mode"] = displayModeName(displayMode);           // configured mode
   doc["effective"] = displayModeName(effectiveMode());   // what's on screen now
+  doc["host_offline"] = hostGoingAway || bridgeStale();
+  doc["time_source"] = currentTimeSource();
+  doc["ntp_synced"] = ntpSynced;
   doc["music_playing"] = statusMusicPlaying;
   doc["showing"] = (currentApp == APP_CLAUDE) ? "claude" : "codex";
   doc["last_update_s"] = everPolled ? (long)((millis() - lastSuccessMs) / 1000) : -1;
@@ -3112,7 +3193,17 @@ void handleUsbFrame(const String &json) {
   lastUsbStatusMs = millis();
   everUsbStatus = true;
   String type = doc["type"] | "";
+  if (type == "host_going_away") {
+    hostGoingAway = true;
+    claudeStatus.needsInput = false;
+    codexStatus.needsInput = false;
+    domesticStatus.needsInput = false;
+    drawScreenSaver(true);
+    sendUsbFrame("info", deviceInfoJson());
+    return;
+  }
   if (type == "hello") {
+    hostGoingAway = false;
     lastUsbStatusMs = millis();
     everUsbStatus = true;
     sendUsbFrame("hello_ack");
@@ -3123,6 +3214,7 @@ void handleUsbFrame(const String &json) {
     return;
   }
   if (type == "status") {
+    hostGoingAway = false;
     String payload;
     serializeJson(doc["data"], payload);
     if (parseStatusJson(payload, !usbAlertInitialized)) {
@@ -3595,6 +3687,7 @@ void serviceWiFi() {
 
   if (WiFi.status() == WL_CONNECTED) {
     wifiDisconnectedSinceMs = 0;
+    serviceNtp();
     if (wifiPortalActive) {
       wifiManager.stopConfigPortal();
       wifiPortalActive = false;
@@ -3647,6 +3740,7 @@ void setup() {
   Serial.begin(460800);
   LittleFS.begin();
   loadBridgeHost();
+  loadUtcOffset();
   loadBrightness();
   loadCustomSpriteState();
 

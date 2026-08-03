@@ -18,6 +18,9 @@ class DeviceInfo
     public string Mode = "auto";       // configured display mode, including screensaver
     public string Effective = "auto";  // AUTO may promote to domestic or music
     public string Showing = "";
+    public bool HostOffline;           // Windows bridge stopped or heartbeat expired
+    public string TimeSource = "none"; // bridge, ntp, holdover or none
+    public bool NtpSynced;
     public int LastUpdateS = -1;       // seconds since the device last got /status data, -1 = never
     public int SpriteRev;              // bumped by the device on animation change
     public int Brightness = 100;       // backlight 0-100 (0 = off)
