@@ -289,7 +289,7 @@ Mac 端常驻进程由 LaunchAgent（`~/Library/LaunchAgents/local.AIClockBridge
   PostToolUse/Stop/SessionEnd/Notification/PreCompact/SubagentStop，每条 `-m 1` 超时，
   不会拖慢 Claude Code；与已有 hooks 共存，靠命令里的 `8765/event` 标记幂等）
 - 映射：UserPromptSubmit/Pre/PostToolUse 等 → working（TTL 10 分钟，覆盖长工具调用）；
-  Stop/Notification 等 → idle（TTL 60 秒，只用来立刻压掉 mtime 的"工作尾巴"）
+  Stop/Notification 等 → idle（TTL 60 秒，只用来立刻压掉 mtime 的"工作尾巴"）；Stop 不触发完成提醒
 - Codex 侧已写入 `~/.codex/hooks.json` + `config.toml [features] hooks = true`，
   但 Codex 要求在 TUI 里跑一次 `/hooks` 信任新命令后才生效；未信任前走 mtime 兜底。
 - 局限：事件是全局的不分会话——A 会话 Stop 会把还在干活的 B 会话压成 idle 最多 60 秒
@@ -382,12 +382,14 @@ Windows 每秒通过 `GetLastInputInfo` 读取系统键鼠空闲时间，超时�
 
 「立即预览」通过 `screensaver_preview` 强制保持屏保画面，5 秒内忽略 working 状态和键鼠输入，
 到时由 Windows 主动恢复原页面。审批提醒具有全局优先级，即使固定在股票、天气
-等页面也会切到对应桌宠并闪烁红色边框。Codex 收到 `Stop` hook，或桥接在 Codex Desktop
-会话 JSONL 末尾读到新的 `event_msg.payload.type = task_complete` 时触发完成提醒：Windows 播放一次
+等页面也会切到对应桌宠并闪烁红色边框。桥接只在 Codex Desktop/CLI 会话 JSONL 新增内容中
+读到明确的 `event_msg.payload.type = task_complete`（或集成方显式推送 `TaskComplete`）时触发完成提醒；
+Hook `Stop` 仅更新为空闲。完成时 Windows 播放一次
 系统提示音，设备四边完整绿框以独立 140 ms 节拍做 5 次渐变脉冲并播放桌宠动画，随后恢复真实额度进度环
 和提醒前的固定页面。闪烁期间又有任务完成时，从新的完成序号重新计算 5 次；完成后出现的新事件会再次触发。
-JSONL 检测只读取桥接
-启动后发生变化的文件末尾，不修改或占用 Codex Desktop 自己的 `notify` 配置。
+JSONL 检测启动时以现有 EOF 为基线，之后为每个文件维护增量读取位置、保留未写完的末行，
+并按 `turn_id` 去重。这样即使完成后紧接着写入超过 128KB 的上下文也不会漏报，旧大文件恢复
+写入也不会重放历史完成事件。它不修改或占用 Codex Desktop 自己的 `notify` 配置。
 
 ## 已知限制 / TODO
 

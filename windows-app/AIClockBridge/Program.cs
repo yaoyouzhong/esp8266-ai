@@ -397,7 +397,7 @@ static class Program
                 await Task.Delay(100);
             }
             if (usb.DeviceInfo?.Effective != "stock") throw new Exception("pinned page did not resume after approval");
-            service.RecordEvent("codex", "Stop");
+            service.RecordEvent("codex", "TaskComplete");
             var completionSnapshot = service.Snapshot();
             Console.Error.WriteLine($"[test-usb] completion bridge state active={completionSnapshot.Codex.CompletionActive}, seq={completionSnapshot.Codex.CompletionSeq}, at={completionSnapshot.Codex.CompletionAt}");
             for (var i = 0; i < 40 && (usb.DeviceInfo?.Effective != "auto" || usb.DeviceInfo?.Showing != "codex"); i++)
@@ -409,7 +409,7 @@ static class Program
                 throw new Exception($"Codex completion alert did not activate (bridge_active={service.Snapshot().Codex.CompletionActive}, seq={service.Snapshot().Codex.CompletionSeq}, effective={usb.DeviceInfo?.Effective ?? "--"}, showing={usb.DeviceInfo?.Showing ?? "--"})");
             var firstCompletionSeq = service.Snapshot().Codex.CompletionSeq;
             await Task.Delay(100);
-            service.RecordEvent("codex", "Stop");
+            service.RecordEvent("codex", "TaskComplete");
             if (service.Snapshot().Codex.CompletionSeq <= firstCompletionSeq)
                 throw new Exception("second Codex completion was not retained");
             await Task.Delay(7800);
@@ -587,7 +587,7 @@ static class Program
             if (usb.DeviceInfo?.Effective != "stock")
                 throw new Exception("approval clear did not restore stock");
 
-            service.RecordEvent("codex", "Stop");
+            service.RecordEvent("codex", "TaskComplete");
             for (var i = 0; i < 40 && (usb.DeviceInfo?.Effective != "auto" || usb.DeviceInfo?.Showing != "codex"); i++)
             {
                 usb.RequestInfo();
@@ -596,7 +596,7 @@ static class Program
             if (usb.DeviceInfo?.Effective != "auto" || usb.DeviceInfo?.Showing != "codex")
                 throw new Exception("completion alert did not activate");
             var firstSeq = service.Snapshot().Codex.CompletionSeq;
-            service.RecordEvent("codex", "Stop");
+            service.RecordEvent("codex", "TaskComplete");
             if (service.Snapshot().Codex.CompletionSeq <= firstSeq)
                 throw new Exception("second completion event was not retained");
 

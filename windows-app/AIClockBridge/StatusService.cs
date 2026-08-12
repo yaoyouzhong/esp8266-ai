@@ -231,8 +231,7 @@ sealed class StatusService
 {
     readonly string _claudeDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "projects");
-    readonly string _codexDir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "sessions");
+    readonly string _codexDir;
     readonly double _startedAt = Now();
 
     /// Real OAuth quota (5h/weekly windows) merged into snapshots when set;
@@ -269,6 +268,32 @@ sealed class StatusService
     const double IdleEventTTL = 60;
     const double NeedsInputTTL = 5 * 60;
 
+    sealed class CodexLogCursor
+    {
+        public long Position;
+        public string Partial = "";
+    }
+
+    readonly Dictionary<string, CodexLogCursor> _codexLogCursors =
+        new(StringComparer.OrdinalIgnoreCase);
+    readonly HashSet<string> _seenCodexCompletionTurns = new(StringComparer.Ordinal);
+
+    public StatusService(string codexDir = null)
+    {
+        _codexDir = codexDir ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "sessions");
+        // Existing logs are history, not newly completed work. Starting at
+        // their current EOF prevents an old task_complete from flashing after
+        // every bridge restart or when a large old session becomes active.
+        if (!Directory.Exists(_codexDir)) return;
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(_codexDir, "*.jsonl", SearchOption.AllDirectories))
+                _codexLogCursors[file] = new CodexLogCursor { Position = new FileInfo(file).Length };
+        }
+        catch { }
+    }
+
     static readonly HashSet<string> WorkingEvents = new()
     {
         "UserPromptSubmit", "PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop",
@@ -295,7 +320,12 @@ sealed class StatusService
         lock (_lock)
         {
             var now = Now();
-            if (agent == "codex" && ev == "Stop")
+            // Stop means the current agent turn stopped. It is emitted for
+            // interruptions and intermediate turns too, so it must not be
+            // presented as a completed user task. TaskComplete is an explicit
+            // integration event; Desktop/CLI JSONL task_complete is the normal
+            // authoritative source.
+            if (agent == "codex" && ev == "TaskComplete")
                 changed |= SetCodexCompletion(now);
             // Claude Notification: flash only for permission prompts, not for
             // "task done / waiting for your input" notifications.
@@ -644,20 +674,45 @@ sealed class StatusService
         return "";
     }
 
-    static double LatestCodexTaskComplete(string path, double afterEpoch)
+    List<double> ReadNewCodexTaskCompletes(string path)
     {
+        var completions = new List<double>();
         try
         {
+            if (!_codexLogCursors.TryGetValue(path, out var cursor))
+            {
+                cursor = new CodexLogCursor();
+                _codexLogCursors[path] = cursor;
+            }
+            var observedLength = new FileInfo(path).Length;
+            if (cursor.Position == observedLength) return completions;
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
                                           FileShare.ReadWrite | FileShare.Delete);
-            const int tailBytes = 128 * 1024;
-            var tailStart = Math.Max(0, fs.Length - tailBytes);
-            fs.Seek(tailStart, SeekOrigin.Begin);
+            // A same-path replacement/truncation is treated as a new baseline;
+            // replaying its historical contents would create false alerts.
+            if (cursor.Position > fs.Length)
+            {
+                cursor.Position = fs.Length;
+                cursor.Partial = "";
+                return completions;
+            }
+            fs.Seek(cursor.Position, SeekOrigin.Begin);
             using var reader = new StreamReader(fs, Encoding.UTF8);
-            if (tailStart > 0) reader.ReadLine(); // discard a partial UTF-8/JSON line
-            double latest = 0;
-            string line;
-            while ((line = reader.ReadLine()) != null)
+            var appended = reader.ReadToEnd();
+            // Use the position actually consumed by StreamReader. If Codex
+            // appends between ReadToEnd and this assignment, fs.Length may be
+            // newer and would skip those bytes on the next poll.
+            cursor.Position = fs.Position;
+            if (appended.Length == 0) return completions;
+            var text = cursor.Partial + appended;
+            var lastNewline = text.LastIndexOf('\n');
+            if (lastNewline < 0)
+            {
+                cursor.Partial = text;
+                return completions;
+            }
+            cursor.Partial = text[(lastNewline + 1)..];
+            foreach (var line in text[..lastNewline].Split('\n'))
             {
                 if (!line.Contains("\"task_complete\"", StringComparison.Ordinal)) continue;
                 try
@@ -667,18 +722,21 @@ sealed class StatusService
                     if (!TryProp(root, "payload", out var payload)
                         || StringVal(payload, "type") != "task_complete") continue;
                     var timestamp = ParseIso(StringVal(root, "timestamp")) ?? 0;
-                    if (timestamp >= afterEpoch && timestamp > latest) latest = timestamp;
+                    if (timestamp < _startedAt) continue;
+                    var turnId = StringVal(payload, "turn_id") ?? "";
+                    if (turnId.Length > 0 && !_seenCodexCompletionTurns.Add(turnId)) continue;
+                    completions.Add(timestamp);
                 }
                 catch
                 {
                     // The final line may still be in flight; the next scan retries it.
                 }
             }
-            return latest;
+            return completions;
         }
         catch
         {
-            return 0;
+            return completions;
         }
     }
 
@@ -819,7 +877,7 @@ sealed class StatusService
     {
         var now = Now();
         double lastMtime = 0;
-        double latestTaskComplete = 0;
+        var taskCompletes = new List<double>();
 
         // Whole-tree scan just for the freshest mtime (drives working/idle).
         if (Directory.Exists(_codexDir))
@@ -831,9 +889,7 @@ sealed class StatusService
                     var mtime = new DateTimeOffset(File.GetLastWriteTimeUtc(file), TimeSpan.Zero)
                         .ToUnixTimeMilliseconds() / 1000.0;
                     if (mtime > lastMtime) lastMtime = mtime;
-                    if (mtime >= _startedAt)
-                        latestTaskComplete = Math.Max(latestTaskComplete,
-                            LatestCodexTaskComplete(file, _startedAt));
+                    taskCompletes.AddRange(ReadNewCodexTaskCompletes(file));
                 }
             }
             catch
@@ -842,10 +898,10 @@ sealed class StatusService
             }
         }
 
-        if (latestTaskComplete > _codexCompletionObservedAt)
+        foreach (var taskComplete in taskCompletes.Order())
         {
-            var completionChanged = SetCodexCompletion(latestTaskComplete);
-            _codexEvent = new AgentEvent("idle", latestTaskComplete);
+            var completionChanged = SetCodexCompletion(taskComplete);
+            _codexEvent = new AgentEvent("idle", taskComplete);
             _codexNeedsInputAt = null;
             if (completionChanged) QueueCallback(UrgentUpdate);
         }
