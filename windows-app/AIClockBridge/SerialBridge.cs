@@ -68,8 +68,20 @@ sealed class SerialBridge : IDisposable
 
     public bool Connected => _port?.IsOpen == true
         && DateTime.UtcNow - _lastHelloAt < TimeSpan.FromSeconds(15);
+    public bool Recovering => _port?.IsOpen == true && !Connected;
     public string PortName => Connected ? _port.PortName : "";
     public DeviceInfo DeviceInfo => Connected ? _deviceInfo : null;
+
+    public async Task<bool> WaitForConnection(TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (Connected) return true;
+            await Task.Delay(100);
+        }
+        return Connected;
+    }
 
     public SerialBridge(StatusService status, NetSpeedMonitor net, NowPlayingMonitor music,
                         StockMonitor stocks = null, WeatherMonitor weather = null,
@@ -371,7 +383,13 @@ sealed class SerialBridge : IDisposable
         if (!Connected)
         {
             Send("hello");
-            if (DateTime.UtcNow - _portOpenedAt > TimeSpan.FromSeconds(20)) ClosePort();
+            // A healthy long-running port can miss a heartbeat briefly. Give
+            // it five seconds beyond the 15-second freshness window to answer
+            // before reopening CH340; using the original port-open time closed
+            // every established connection on its first transient timeout.
+            var lastContact = _lastHelloAt == DateTime.MinValue ? _portOpenedAt : _lastHelloAt;
+            if (lastContact != DateTime.MinValue
+                && DateTime.UtcNow - lastContact > TimeSpan.FromSeconds(20)) ClosePort();
             return;
         }
         if (!_telemetryEnabled || _transferActive) return;

@@ -50,6 +50,7 @@ static class DeviceClient
     // posts, 30s sprite pull, 60s GIF upload+on-device decode), so the client
     // itself must not impose a shorter global one
     static readonly HttpClient Http = new() { Timeout = Timeout.InfiniteTimeSpan };
+    static readonly TimeSpan UsbRecoveryTimeout = TimeSpan.FromSeconds(8);
     public static SerialBridge Usb { get; set; }
 
     public static string Host
@@ -85,10 +86,11 @@ static class DeviceClient
     /// GET /api/info
     public static async Task<DeviceInfo> FetchInfo()
     {
-        if (Usb?.Connected == true)
+        var usb = await ReadyUsb();
+        if (usb != null)
         {
-            Usb.RequestInfo();
-            if (Usb.DeviceInfo is { } usbInfo) return usbInfo;
+            usb.RequestInfo();
+            if (usb.DeviceInfo is { } usbInfo) return usbInfo;
         }
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         string body;
@@ -97,6 +99,10 @@ static class DeviceClient
             body = await Http.GetStringAsync(Resolve("api/info"), cts.Token);
         }
         catch (DeviceException) { throw; }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested)
+        {
+            throw new DeviceException("无法连接设备：连接超时（5 秒）");
+        }
         catch (Exception e)
         {
             throw new DeviceException($"无法连接设备：{e.Message}");
@@ -147,10 +153,11 @@ static class DeviceClient
     }
 
     /// POST /api/display; firmware validates the shared mode names.
-    public static Task SetDisplayMode(string mode)
+    public static async Task SetDisplayMode(string mode)
     {
-        if (Usb?.Connected == true) { Usb.SetDisplayMode(mode); return Task.CompletedTask; }
-        return PostForm("api/display", new() { ["mode"] = mode });
+        var usb = await ReadyUsb();
+        if (usb != null) { usb.SetDisplayMode(mode); return; }
+        await PostForm("api/display", new() { ["mode"] = mode });
     }
 
     /// POST /api/bridge  host=ip:port
@@ -227,6 +234,14 @@ static class DeviceClient
 
     // MARK: - internals
 
+    static async Task<SerialBridge> ReadyUsb()
+    {
+        var usb = Usb;
+        if (usb == null) return null;
+        if (usb.Connected) return usb;
+        return usb.Recovering && await usb.WaitForConnection(UsbRecoveryTimeout) ? usb : null;
+    }
+
     static async Task PostForm(string path, Dictionary<string, string> fields)
     {
         var url = Resolve(path);
@@ -236,6 +251,10 @@ static class DeviceClient
         try
         {
             resp = await Http.PostAsync(url, content, cts.Token);
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested)
+        {
+            throw new DeviceException("请求超时（8 秒）");
         }
         catch (Exception e)
         {

@@ -15,6 +15,7 @@ sealed class TrayAppContext : ApplicationContext
     const string DomesticProviderKey = "domestic_provider";
     const string ScreenSaverTimeoutKey = "screensaver_timeout_minutes";
     const string ScreenSaverPreviousModeKey = "screensaver_previous_mode";
+    static readonly TimeSpan AutomaticScreenSaverRetryDelay = TimeSpan.FromSeconds(30);
     static readonly (string Title, string Mode)[] DisplayModes =
     {
         ("智能跟随", "auto"), ("Claude", "claude"),
@@ -69,6 +70,8 @@ sealed class TrayAppContext : ApplicationContext
     string _domesticProvider = "qwen";
     DateTime _lastScreenSaverActivityAt = DateTime.UtcNow;
     DateTime _ignoreScreenSaverWakeUntil = DateTime.MinValue;
+    DateTime _nextScreenSaverAttemptAt = DateTime.MinValue;
+    bool _automaticScreenSaverFailureLogged;
 
     public TrayAppContext(StatusService service, UsageFetcher usage, DomesticQuotaService domesticUsage,
                           NetSpeedMonitor netMonitor,
@@ -390,6 +393,8 @@ sealed class TrayAppContext : ApplicationContext
         _screenSaverTimeoutMinutes = minutes;
         Settings.Set(ScreenSaverTimeoutKey, minutes.ToString());
         _lastScreenSaverActivityAt = DateTime.UtcNow;
+        _nextScreenSaverAttemptAt = DateTime.MinValue;
+        _automaticScreenSaverFailureLogged = false;
         UpdateScreenSaverMenu();
         if (minutes == 0 && _screenSaverActive) await ExitScreenSaver();
     }
@@ -413,7 +418,12 @@ sealed class TrayAppContext : ApplicationContext
         var modelActivity = HasModelActivity();
         var musicWake = ShouldWakeForMusic();
         var important = modelActivity || musicWake;
-        if (important || systemIdle < TimeSpan.FromSeconds(2)) _lastScreenSaverActivityAt = now;
+        if (important || systemIdle < TimeSpan.FromSeconds(2))
+        {
+            _lastScreenSaverActivityAt = now;
+            _nextScreenSaverAttemptAt = DateTime.MinValue;
+            _automaticScreenSaverFailureLogged = false;
+        }
 
         if (_screenSaverActive)
         {
@@ -429,7 +439,7 @@ sealed class TrayAppContext : ApplicationContext
             if (musicWake || systemIdle < TimeSpan.FromSeconds(2)) await ExitScreenSaver();
             return;
         }
-        if (_screenSaverTimeoutMinutes <= 0 || important) return;
+        if (_screenSaverTimeoutMinutes <= 0 || important || now < _nextScreenSaverAttemptAt) return;
         var effectiveIdle = Math.Min(systemIdle.TotalSeconds, (now - _lastScreenSaverActivityAt).TotalSeconds);
         if (effectiveIdle >= _screenSaverTimeoutMinutes * 60) await EnterScreenSaver(preview: false);
     }
@@ -462,6 +472,8 @@ sealed class TrayAppContext : ApplicationContext
             if (_cycleEnabled) _cycleTimer.Stop();
             await DeviceClient.SetDisplayMode(preview ? "screensaver_preview" : "screensaver");
             if (preview) _ignoreScreenSaverWakeUntil = DateTime.UtcNow.AddSeconds(5);
+            _nextScreenSaverAttemptAt = DateTime.MinValue;
+            _automaticScreenSaverFailureLogged = false;
             _lastKnownMode = "screensaver";
             await RefreshDeviceSection();
         }
@@ -469,7 +481,19 @@ sealed class TrayAppContext : ApplicationContext
         {
             _screenSaverActive = false;
             _screenSaverPreviewActive = false;
-            Toast("进入屏保失败", e.Message);
+            if (preview)
+            {
+                Toast("进入屏保失败", e.Message);
+            }
+            else
+            {
+                _nextScreenSaverAttemptAt = DateTime.UtcNow + AutomaticScreenSaverRetryDelay;
+                if (!_automaticScreenSaverFailureLogged)
+                {
+                    StartupManager.Log($"automatic screensaver deferred: {e.Message}");
+                    _automaticScreenSaverFailureLogged = true;
+                }
+            }
         }
         finally { _screenSaverBusy = false; }
     }
