@@ -92,6 +92,7 @@ static class Program
         catch (Exception e) { StartupManager.Log($"startup registration migration failed: {e.Message}"); }
 
         var service = new StatusService();
+        service.DomesticProviderOverride = ConfiguredDomesticProvider();
         service.CodexCompletion = () => System.Media.SystemSounds.Asterisk.Play();
         var codexWasForeground = ForegroundApp.IsCodex;
         using var completionAcknowledger = new System.Threading.Timer(_ =>
@@ -209,6 +210,12 @@ static class Program
             serialBridge.NotifyHostGoingAway();
             StartupManager.Log("bridge stopped");
         }
+    }
+
+    static string ConfiguredDomesticProvider()
+    {
+        var configured = Settings.Get("domestic_provider");
+        return DomesticProviderCatalog.All.Any(x => x.Id == configured) ? configured : "";
     }
 
     static async Task<int> TestPet(string[] args)

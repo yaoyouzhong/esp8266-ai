@@ -357,17 +357,19 @@ Windows 会把股票名称和天气三块中文位图合并成 RLE 页面缓存�
   Token Plan 使用总额度百分比和固定 `plan_reset_at`；若产品是 Coding Plan，只有控制台实际返回
   5H/WK 窗口时才展示对应百分比和倒计时。设备把团队版、企业版等版本映射为 `TEAM`、`ENTERPRISE` 等金色徽标。
   月之暗面从 Kimi Coding Plan 页面响应读取会员权益，并从 `BillingService/GetUsages`
-  的 `detail` 与 `limits[].detail` 计算 Weekly 和 5H 已用百分比，同时从控制台卡片读取各自重置时间。当前单选厂商在启动时立即读取、随后每 2 分钟
+  的 `detail` 与 `limits[].detail` 计算 Weekly 和 5H 已用百分比，同时从控制台卡片读取各自重置时间。MiniMax 优先调用官方
+  `https://www.minimaxi.com/v1/token_plan/remains`，使用 Windows 凭据管理器里的 `AIClockBridge/MiniMaxTokenPlanKey`
+  或桥接进程环境变量 `MINIMAX_SUBSCRIPTION_KEY`、`MINIMAX_TOKEN_PLAN_KEY`、`MINIMAX_API_KEY`；只缓存百分比、重置时间和可显示套餐名，不缓存 Key。当前单选厂商在启动时立即读取、随后每 2 分钟
   使用持久化 WebView2 登录态后台刷新；同一厂商最少间隔 60 秒，供应商返回 429 时退避 5 分钟。结果缓存到
   `%APPDATA%\AIClockBridge\domestic-quota-cache.json`。
 
-阿里云和 Kimi 登录使用 `%APPDATA%\AIClockBridge\quota-auth-profile` 的独立 WebView2 profile。
+阿里云、Kimi 和 MiniMax 登录使用 `%APPDATA%\AIClockBridge\quota-auth-profile` 的独立 WebView2 profile。
 登录成功后把会话 Cookie 持久化 30 天，每次成功读取额度自动续期；Cookie 值不写入额度
 JSON 缓存或日志。供应商主动撤销会话时仍需重新登录。
 
 「显示模式 → 国产模型」使用同一份 `DomesticProviderCatalog` 生成厂商子菜单，严格单选；
 当前选项写入 `%APPDATA%\AIClockBridge\settings.json` 的 `domestic_provider`。目录列出国内
-主流厂商，未实现准确额度解析的条目显示「待接」，选择后仍进入统一国产模型页面并显示未知额度。
+主流厂商，未实现准确额度解析的条目显示「待接」，选择后仍进入统一国产模型页面并显示未知额度；已支持厂商没有可验证额度时也保持未知，不回退显示其他厂商缓存。
 
 ## 10. Windows 自动屏保
 

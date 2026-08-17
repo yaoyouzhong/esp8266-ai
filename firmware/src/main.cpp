@@ -300,6 +300,8 @@ struct DomesticStatus {
   DomesticProviderStatus active;
   DomesticProviderStatus qwen;
   DomesticProviderStatus xiaomi;
+  DomesticProviderStatus kimi;
+  DomesticProviderStatus minimax;
 };
 
 ClaudeStatus claudeStatus;
@@ -313,6 +315,7 @@ bool everPolled = false;
 // USB bridge frames share the CH340 serial stream with human-readable debug
 // logs. Only lines with this prefix are parsed as protocol messages.
 const char *USB_FRAME_PREFIX = "@AICLOCK ";
+const size_t USB_TEXT_FRAME_MAX = 8192;
 const unsigned long USB_STALE_MS = 8000;
 bool hostGoingAway = false;
 unsigned long lastUsbStatusMs = 0;
@@ -477,6 +480,7 @@ void drawStaticChrome() {
 // Bridge unreachable / data stale -> flashing red overrides everything else,
 // matches the "urgent, look now" state from the reference signal-light design.
 bool bridgeStale() {
+  if (usbBridgeActive()) return false;
   if (!everPolled) return true;
   return (millis() - lastSuccessMs) >= 2UL * BRIDGE_POLL_INTERVAL_MS;
 }
@@ -2379,10 +2383,14 @@ bool parseStatusJson(const String &payload, bool applyAlertState = true) {
     if (applyAlertState) domesticStatus.needsInput = d["needs_input"] | false;
     readDomesticProvider(d["qwen"], domesticStatus.qwen);
     readDomesticProvider(d["xiaomi"], domesticStatus.xiaomi);
+    readDomesticProvider(d["kimi"], domesticStatus.kimi);
+    readDomesticProvider(d["minimax"], domesticStatus.minimax);
     JsonObject active = d["active"];
     if (!active.isNull()) readDomesticProvider(active, domesticStatus.active);
-    else domesticStatus.active = domesticStatus.activeProvider == "xiaomi"
-                                   ? domesticStatus.xiaomi : domesticStatus.qwen;
+    else if (domesticStatus.activeProvider == "xiaomi") domesticStatus.active = domesticStatus.xiaomi;
+    else if (domesticStatus.activeProvider == "kimi") domesticStatus.active = domesticStatus.kimi;
+    else if (domesticStatus.activeProvider == "minimax") domesticStatus.active = domesticStatus.minimax;
+    else domesticStatus.active = domesticStatus.qwen;
   }
   statusMusicPlaying = doc["music_playing"] | false;
   uint32_t statusEpoch = doc["ts"] | 0UL;
@@ -2416,6 +2424,33 @@ DisplayMode effectiveMode() {
     if (domesticStatus.status == "working") return MODE_DOMESTIC;
   }
   return displayMode;
+}
+
+void drawEffectiveMode(DisplayMode eff, bool force, unsigned long nowMs = 0) {
+  if (eff == MODE_NET) {
+    netChromeDrawn = false;
+    lastNetPollMs = 0;
+  } else if (eff == MODE_MUSIC) {
+    musicChromeDrawn = false;
+    lastMusicPollMs = 0;
+  } else if (eff == MODE_DUAL) {
+    drawDualScreen(force);
+  } else if (eff == MODE_DOMESTIC) {
+    drawDomesticScreen(force);
+  } else if (eff == MODE_STOCK) {
+    stockPage = 0;
+    lastStockPageMs = nowMs ? nowMs : millis();
+    lastStockPollMs = 0;
+    drawStockCachedOrLoading();
+  } else if (eff == MODE_WEATHER) {
+    lastWeatherPollMs = 0;
+    drawWeatherCachedOrLoading();
+  } else if (eff == MODE_SCREENSAVER) {
+    drawScreenSaver(force);
+  } else {
+    updateActiveApp();
+    drawActiveApp();
+  }
 }
 
 void pollBridge() {
@@ -2454,7 +2489,10 @@ void pollBridge() {
   }
   http.end();
   DisplayMode eff = effectiveMode();
-  if (eff == MODE_DOMESTIC) {
+  if (eff != lastEffectiveMode) {
+    lastEffectiveMode = eff;
+    drawEffectiveMode(eff, true);
+  } else if (eff == MODE_DOMESTIC) {
     drawDomesticScreen();
   } else if (eff == MODE_DUAL) {
     drawDualScreen();
@@ -2604,6 +2642,12 @@ String deviceInfoJson() {
   doc["stock_page"] = stockPage;
   doc["stock_page_count"] = stockCount > 0
     ? (stockCount + STOCK_ROWS_PER_PAGE - 1) / STOCK_ROWS_PER_PAGE : 1;
+  JsonObject domestic = doc["domestic"].to<JsonObject>();
+  domestic["active_provider"] = domesticStatus.activeProvider;
+  domestic["active_model"] = domesticStatus.active.model;
+  domestic["qwen_model"] = domesticStatus.qwen.model;
+  domestic["kimi_model"] = domesticStatus.kimi.model;
+  domestic["minimax_model"] = domesticStatus.minimax.model;
   JsonObject cache = doc["ui_cache"].to<JsonObject>();
   cache["stock"] = LittleFS.exists(STOCK_UI_CACHE_FILE);
   cache["weather"] = LittleFS.exists(WEATHER_UI_CACHE_FILE);
@@ -3198,6 +3242,7 @@ void handleUsbFrame(const String &json) {
     claudeStatus.needsInput = false;
     codexStatus.needsInput = false;
     domesticStatus.needsInput = false;
+    lastEffectiveMode = MODE_SCREENSAVER;
     drawScreenSaver(true);
     sendUsbFrame("info", deviceInfoJson());
     return;
@@ -3223,7 +3268,10 @@ void handleUsbFrame(const String &json) {
       lastSuccessMs = millis();
       everPolled = true;
       DisplayMode eff = effectiveMode();
-      if (eff == MODE_DOMESTIC) {
+      if (eff != lastEffectiveMode) {
+        lastEffectiveMode = eff;
+        drawEffectiveMode(eff, true);
+      } else if (eff == MODE_DOMESTIC) {
         drawDomesticScreen();
       } else if (eff == MODE_DUAL) {
         drawDualScreen();
@@ -3263,7 +3311,10 @@ void handleUsbFrame(const String &json) {
     lastUsbStatusMs = millis();
     everUsbStatus = true;
     DisplayMode eff = effectiveMode();
-    if (eff == MODE_DOMESTIC) {
+    if (eff != lastEffectiveMode) {
+      lastEffectiveMode = eff;
+      drawEffectiveMode(eff, true);
+    } else if (eff == MODE_DOMESTIC) {
       drawDomesticScreen();
     } else if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_STOCK
                && eff != MODE_WEATHER && eff != MODE_SCREENSAVER
@@ -3365,7 +3416,7 @@ void handleUsbSerial() {
       }
       line = "";
     } else if (ch != '\r') {
-      if (line.length() < 2048) line += ch;
+      if (line.length() < USB_TEXT_FRAME_MAX) line += ch;
       else line = "";
     }
   }
@@ -3769,30 +3820,7 @@ void loop() {
   DisplayMode eff = effectiveMode();
   if (eff != lastEffectiveMode) {
     lastEffectiveMode = eff;
-    if (eff == MODE_NET) {
-      netChromeDrawn = false;
-      lastNetPollMs = 0;
-    } else if (eff == MODE_MUSIC) {
-      musicChromeDrawn = false;
-      lastMusicPollMs = 0;
-    } else if (eff == MODE_DUAL) {
-      drawDualScreen(true);
-    } else if (eff == MODE_DOMESTIC) {
-      drawDomesticScreen(true);
-    } else if (eff == MODE_STOCK) {
-      stockPage = 0;
-      lastStockPageMs = nowMs;
-      lastStockPollMs = 0;
-      drawStockCachedOrLoading();
-    } else if (eff == MODE_WEATHER) {
-      lastWeatherPollMs = 0;
-      drawWeatherCachedOrLoading();
-    } else if (eff == MODE_SCREENSAVER) {
-      drawScreenSaver(true);
-    } else {
-      updateActiveApp();
-      drawActiveApp();
-    }
+    drawEffectiveMode(eff, true, nowMs);
   }
 
   if (eff == MODE_NET) {

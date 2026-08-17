@@ -67,14 +67,14 @@ The standalone clock uses its saved home Wi-Fi to synchronize directly against A
 
 Daily use is all on the tray icon: **left-click** opens a live mirror (with a brightness slider); **right-click** opens grouped menus for quota, device connection, display modes, page cycling, content, pets and bridge service. Page cycling is enabled on first launch with a 15-second Codex, Claude, weather and stock sequence; users can select pages, reorder them and choose a 10/15/30/60-second interval. A manual page switch stops cycling.
 The **Claude + Codex Quota** display mode puts both providers' limits and reset countdowns on one page.
-**Display mode → Domestic models** lists the major Chinese vendors and selects exactly one. Alibaba Bailian and Moonshot Kimi are currently wired for verified quota capture; other entries are marked pending.
+**Display mode → Domestic models** lists the major Chinese vendors and selects exactly one. Alibaba Bailian, Moonshot Kimi and MiniMax are currently wired for verified quota capture. MiniMax uses the official Token Plan API first and needs a Subscription Key / API Key saved in the authorization page, or one of `MINIMAX_SUBSCRIPTION_KEY`, `MINIMAX_TOKEN_PLAN_KEY` or `MINIMAX_API_KEY` in the bridge process environment. Other entries are marked pending.
 Screen saver controls are under **Display mode → Screen saver**, including timeout selection and immediate preview.
 
 ## FAQ
 
 - **Screen border flashing red**: the device cannot reach the bridge. On Windows, check the USB data cable and the bridge app first; for macOS or wireless fallback, check LAN reachability.
 - **Windows devices on the same WiFi still cannot communicate**: keep the USB data cable attached. Status, media, weather, stocks, display control and pet transfer all use direct COM transport and do not require LAN peer access.
-- **Quota shows `-` / `--`**: the provider did not return a verifiable value. Qwen Token Plan and Kimi Coding Plan require one sign-in under “Model quota → Domestic model quota authorization”; the authorization page opens the currently selected vendor. Its isolated WebView2 session is retained for 30 days and renewed after successful reads. Domestic `today` tokens currently come only from local Claude Code logs and do not represent every app using the vendor account.
+- **Quota shows `-` / `--`**: the provider did not return a verifiable value. Qwen Token Plan and Kimi Coding Plan require one sign-in under “Model quota → Domestic model quota authorization”; MiniMax requires a Subscription Key / API Key saved there, or one of `MINIMAX_SUBSCRIPTION_KEY`, `MINIMAX_TOKEN_PLAN_KEY` or `MINIMAX_API_KEY` in the bridge process environment. The authorization page opens the currently selected vendor. Its isolated WebView2 session is retained for 30 days and renewed after successful reads; the MiniMax key is stored in Windows Credential Manager and is never written to settings or quota caches. Domestic `today` tokens currently come only from local Claude Code logs and do not represent every app using the vendor account.
 - **Want a different pet**: right-click the tray icon → "Change pet animation…", pick one and upload.
 
 ## Development

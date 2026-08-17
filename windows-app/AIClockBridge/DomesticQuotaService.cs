@@ -22,7 +22,7 @@ static class DomesticProviderCatalog
             "https://platform.xiaomimimo.com/token-plan", false),
         new("zhipu", "智谱 AI", "GLM / Coding Plan", "https://open.bigmodel.cn/usercenter", false),
         new("volcengine", "火山方舟", "豆包大模型", "https://console.volcengine.com/ark", false),
-        new("minimax", "MiniMax", "MiniMax 开放平台", "https://platform.minimaxi.com/", false),
+        new("minimax", "MiniMax", "MiniMax Token Plan", "https://platform.minimaxi.com/console/usage", true),
         new("deepseek", "DeepSeek", "DeepSeek 开放平台", "https://platform.deepseek.com/usage", false),
         new("baidu", "百度智能云", "千帆 / 文心", "https://console.bce.baidu.com/qianfan/overview", false),
         new("tencent", "腾讯云", "混元大模型", "https://console.cloud.tencent.com/hunyuan", false),
@@ -42,16 +42,22 @@ sealed class DomesticQuotaSnapshot
     public double? XiaomiPlanPct;
     public double? KimiWeeklyPct;
     public double? KimiFiveHourPct;
+    public double? MiniMaxWeeklyPct;
+    public double? MiniMaxFiveHourPct;
     public DateTimeOffset? QwenPlanResetAt;
     public DateTimeOffset? QwenWeeklyResetAt;
     public DateTimeOffset? QwenFiveHourResetAt;
     public DateTimeOffset? KimiWeeklyResetAt;
     public DateTimeOffset? KimiFiveHourResetAt;
+    public DateTimeOffset? MiniMaxWeeklyResetAt;
+    public DateTimeOffset? MiniMaxFiveHourResetAt;
     public string QwenMembership = "";
     public string KimiMembership = "";
+    public string MiniMaxMembership = "";
     public DateTime? QwenFetchedAt;
     public DateTime? XiaomiFetchedAt;
     public DateTime? KimiFetchedAt;
+    public DateTime? MiniMaxFetchedAt;
 }
 
 /// Reads the same read-only quota responses as the vendors' own account pages.
@@ -60,11 +66,14 @@ sealed class DomesticQuotaSnapshot
 sealed class DomesticQuotaService
 {
     internal const string QwenSubscriptionName = "Token Plan 团队版";
+    const string MiniMaxCredentialTarget = "AIClockBridge/MiniMaxTokenPlanKey";
+    const string MiniMaxQuotaEndpoint = "https://www.minimaxi.com/v1/token_plan/remains";
     static readonly TimeSpan MinRefreshInterval = TimeSpan.FromSeconds(60);
     static readonly TimeSpan RateLimitBackoff = TimeSpan.FromSeconds(300);
     static readonly string CachePath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "AIClockBridge", "domestic-quota-cache.json");
+    static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
     readonly object _lock = new();
     readonly Dictionary<string, DateTime> _lastRefreshAttempt = new();
     readonly Dictionary<string, DateTime> _backoffUntil = new();
@@ -83,16 +92,22 @@ sealed class DomesticQuotaService
                 XiaomiPlanPct = _snapshot.XiaomiPlanPct,
                 KimiWeeklyPct = _snapshot.KimiWeeklyPct,
                 KimiFiveHourPct = _snapshot.KimiFiveHourPct,
+                MiniMaxWeeklyPct = _snapshot.MiniMaxWeeklyPct,
+                MiniMaxFiveHourPct = _snapshot.MiniMaxFiveHourPct,
                 QwenPlanResetAt = _snapshot.QwenPlanResetAt,
                 QwenWeeklyResetAt = _snapshot.QwenWeeklyResetAt,
                 QwenFiveHourResetAt = _snapshot.QwenFiveHourResetAt,
                 KimiWeeklyResetAt = _snapshot.KimiWeeklyResetAt,
                 KimiFiveHourResetAt = _snapshot.KimiFiveHourResetAt,
+                MiniMaxWeeklyResetAt = _snapshot.MiniMaxWeeklyResetAt,
+                MiniMaxFiveHourResetAt = _snapshot.MiniMaxFiveHourResetAt,
                 QwenMembership = _snapshot.QwenMembership,
                 KimiMembership = _snapshot.KimiMembership,
+                MiniMaxMembership = _snapshot.MiniMaxMembership,
                 QwenFetchedAt = _snapshot.QwenFetchedAt,
                 XiaomiFetchedAt = _snapshot.XiaomiFetchedAt,
                 KimiFetchedAt = _snapshot.KimiFetchedAt,
+                MiniMaxFetchedAt = _snapshot.MiniMaxFetchedAt,
             };
         }
     }
@@ -117,9 +132,72 @@ sealed class DomesticQuotaService
                 && now - lastAttempt < MinRefreshInterval) return;
             _lastRefreshAttempt[providerId] = now;
         }
+        if (providerId == "minimax" && HasMiniMaxApiKey)
+        {
+            _ = RefreshMiniMaxWithApiKey();
+            return;
+        }
         if (_form == null || _form.IsDisposed)
             _form = new DomesticQuotaAuthForm(this, initialProviderId: providerId);
         _form.RefreshInBackground(providerId);
+    }
+
+    internal bool HasMiniMaxApiKey => MiniMaxApiKey().Length > 0;
+
+    internal void SaveMiniMaxApiKey(string key)
+    {
+        if (string.IsNullOrWhiteSpace(key)) return;
+        CredentialStore.Write(MiniMaxCredentialTarget, key.Trim());
+    }
+
+    internal async Task<(bool Success, string Message)> RefreshMiniMaxWithApiKey()
+    {
+        var key = MiniMaxApiKey();
+        if (string.IsNullOrWhiteSpace(key))
+            return (false, "尚未保存 MiniMax Subscription Key / API Key。");
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, MiniMaxQuotaEndpoint);
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer", key.Trim());
+            request.Headers.Accept.ParseAdd("application/json");
+            using var response = await Http.SendAsync(request);
+            if ((int)response.StatusCode == 429)
+            {
+                BackOff("minimax");
+                return (false, "MiniMax 额度接口限流，5 分钟后自动重试。");
+            }
+            var body = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            var usage = DomesticQuotaAuthForm.FindMiniMaxUsage(doc.RootElement);
+            if (!usage.HasValue)
+                return (false, response.IsSuccessStatusCode
+                    ? "MiniMax 响应中没有可识别的额度字段。"
+                    : $"MiniMax 额度接口返回 HTTP {(int)response.StatusCode}。");
+            SetMiniMax(usage.Value.WeeklyPct, usage.Value.FiveHourPct,
+                usage.Value.Membership, usage.Value.WeeklyResetAt, usage.Value.FiveHourResetAt);
+            return (true, "已通过 MiniMax API 取得准确用量。");
+        }
+        catch (Exception ex)
+        {
+            return (false, $"MiniMax API 读取失败：{ex.Message}");
+        }
+    }
+
+    static string MiniMaxApiKey()
+    {
+        var saved = CredentialStore.Read(MiniMaxCredentialTarget).Trim();
+        if (saved.Length > 0) return saved;
+        foreach (var name in new[]
+                 {
+                     "MINIMAX_SUBSCRIPTION_KEY", "MINIMAX_TOKEN_PLAN_KEY",
+                     "MINIMAX_API_KEY"
+                 })
+        {
+            var value = Environment.GetEnvironmentVariable(name)?.Trim() ?? "";
+            if (value.Length > 0) return value;
+        }
+        return "";
     }
 
     internal void BackOff(string providerId)
@@ -182,6 +260,22 @@ sealed class DomesticQuotaService
                 Settings.Set("kimi_membership", _snapshot.KimiMembership);
             }
             _snapshot.KimiFetchedAt = DateTime.UtcNow;
+            Save();
+        }
+    }
+
+    internal void SetMiniMax(double weeklyPct, double? fiveHourPct, string membership = null,
+        DateTimeOffset? weeklyResetAt = null, DateTimeOffset? fiveHourResetAt = null)
+    {
+        lock (_lock)
+        {
+            _snapshot.MiniMaxWeeklyPct = Clamp(weeklyPct);
+            _snapshot.MiniMaxFiveHourPct = fiveHourPct.HasValue ? Clamp(fiveHourPct.Value) : null;
+            if (weeklyResetAt.HasValue) _snapshot.MiniMaxWeeklyResetAt = weeklyResetAt;
+            if (fiveHourResetAt.HasValue) _snapshot.MiniMaxFiveHourResetAt = fiveHourResetAt;
+            if (!string.IsNullOrWhiteSpace(membership))
+                _snapshot.MiniMaxMembership = membership.Trim();
+            _snapshot.MiniMaxFetchedAt = DateTime.UtcNow;
             Save();
         }
     }
@@ -331,6 +425,22 @@ sealed class DomesticQuotaAuthForm : Form
         ForeColor = Color.FromArgb(71, 85, 105),
         Text = "选择左侧厂商。已支持的厂商在登录后会自动读取准确额度。",
     };
+    readonly Panel _miniMaxKeyPanel = new()
+    {
+        Dock = DockStyle.Top, Height = 52, Padding = new Padding(20, 8, 20, 8),
+        BackColor = Color.FromArgb(248, 250, 252), Visible = false,
+    };
+    readonly TextBox _miniMaxApiKey = new()
+    {
+        UseSystemPasswordChar = true,
+        PlaceholderText = "MiniMax Subscription Key / API Key，留空则只测试已保存 Key",
+    };
+    readonly Button _miniMaxSaveKey = new()
+    {
+        Text = "保存并测试", Width = 108, Height = 32,
+        FlatStyle = FlatStyle.Flat, BackColor = Color.White,
+        ForeColor = Color.FromArgb(51, 65, 85),
+    };
 
     public DomesticQuotaAuthForm(DomesticQuotaService service, bool hideOnUserClose = true,
                                  string initialProviderId = "qwen")
@@ -386,8 +496,15 @@ sealed class DomesticQuotaAuthForm : Form
         header.Controls.Add(_providerTitle);
         header.Controls.Add(_providerState);
         header.Controls.Add(refresh);
+        _miniMaxSaveKey.FlatAppearance.BorderColor = Color.FromArgb(203, 213, 225);
+        _miniMaxSaveKey.Click += async (_, _) => await SaveAndTestMiniMaxKey();
+        _miniMaxKeyPanel.Controls.Add(_miniMaxApiKey);
+        _miniMaxKeyPanel.Controls.Add(_miniMaxSaveKey);
+        _miniMaxKeyPanel.Resize += (_, _) => LayoutMiniMaxKeyPanel();
+        LayoutMiniMaxKeyPanel();
         content.Controls.Add(_web);
         content.Controls.Add(_status);
+        content.Controls.Add(_miniMaxKeyPanel);
         content.Controls.Add(header);
         Controls.Add(content);
         Controls.Add(navigation);
@@ -469,7 +586,7 @@ sealed class DomesticQuotaAuthForm : Form
     {
         if (_hideOnUserClose && e.CloseReason == CloseReason.UserClosing)
         {
-            if (_activeProvider?.Id is "qwen" or "kimi") _ = PersistLoginCookies(_activeProvider.Url);
+            if (_activeProvider?.Id is "qwen" or "kimi" or "minimax") _ = PersistLoginCookies(_activeProvider.Url);
             e.Cancel = true;
             Hide();
             return;
@@ -522,12 +639,50 @@ sealed class DomesticQuotaAuthForm : Form
         foreach (var (id, card) in _providerCards)
             card.BackColor = id == provider.Id ? Color.FromArgb(224, 242, 254) : Color.White;
         _providerTitle.Text = $"{provider.Name} · {provider.Product}";
-        _providerState.Text = provider.CaptureSupported
+        _miniMaxKeyPanel.Visible = provider.Id == "minimax";
+        _providerState.Text = provider.Id == "minimax"
+            ? "已支持 API 查询：保存 MiniMax Subscription Key 后自动读取；也可登录控制台作为兜底"
+            : provider.CaptureSupported
             ? "已支持准确额度读取：登录后进入订阅/用量页面即可自动捕获"
             : "已列入厂商目录：可以登录控制台，准确额度读取规则尚待适配";
         _providerState.ForeColor = provider.CaptureSupported
             ? Color.FromArgb(22, 101, 52) : Color.FromArgb(180, 83, 9);
         await Navigate(provider);
+    }
+
+    void LayoutMiniMaxKeyPanel()
+    {
+        var buttonWidth = _miniMaxSaveKey.Width;
+        _miniMaxSaveKey.Location = new Point(_miniMaxKeyPanel.ClientSize.Width
+            - buttonWidth - 20, 10);
+        _miniMaxApiKey.Location = new Point(20, 10);
+        _miniMaxApiKey.Width = Math.Max(120, _miniMaxSaveKey.Left - 30);
+        _miniMaxApiKey.Height = 30;
+    }
+
+    async Task SaveAndTestMiniMaxKey()
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(_miniMaxApiKey.Text))
+            {
+                _service.SaveMiniMaxApiKey(_miniMaxApiKey.Text);
+                _miniMaxApiKey.Clear();
+            }
+            if (!_service.HasMiniMaxApiKey)
+            {
+                _status.Text = "请先粘贴 MiniMax Subscription Key / API Key。";
+                return;
+            }
+            _status.Text = "正在通过 MiniMax API 查询额度...";
+            var result = await _service.RefreshMiniMaxWithApiKey();
+            _capturedForNavigation = result.Success;
+            _status.Text = result.Message;
+        }
+        catch (Exception ex)
+        {
+            _status.Text = $"MiniMax Key 保存或测试失败：{ex.Message}";
+        }
     }
 
     async Task Navigate(DomesticProviderDefinition provider)
@@ -550,7 +705,7 @@ sealed class DomesticQuotaAuthForm : Form
             _finishedReceiver.DevToolsProtocolEventReceived += CdpLoadingFinished;
             _web.CoreWebView2.NavigationCompleted += async (_, e) =>
             {
-                if (e.IsSuccess && _activeProvider?.Id is "qwen" or "kimi")
+                if (e.IsSuccess && _activeProvider?.Id is "qwen" or "kimi" or "minimax")
                     await PersistLoginCookies(_activeProvider.Url);
                 if (e.IsSuccess && _activeProvider?.Id == "kimi")
                     _ = CaptureKimiPageMetadata(_navigationGeneration);
@@ -560,7 +715,9 @@ sealed class DomesticQuotaAuthForm : Form
                 }
             };
         }
-        _status.Text = provider.CaptureSupported
+        _status.Text = provider.Id == "minimax" && _service.HasMiniMaxApiKey
+            ? "MiniMax Key 已保存；后台刷新优先通过官方 API 查询额度。"
+            : provider.CaptureSupported
             ? $"请登录{provider.Name}；捕获到准确用量后会自动缓存百分比。"
             : $"{provider.Name}已提供统一登录入口；当前版本暂不读取其额度数字。";
         _web.CoreWebView2.Navigate(provider.Url);
@@ -733,7 +890,7 @@ sealed class DomesticQuotaAuthForm : Form
         // WebView before BillingService/GetUsage completed, leaving both
         // Weekly and 5H stuck on the last successful cache.
         await Task.Delay(TimeSpan.FromSeconds(provider.Id == "qwen" ? 45
-            : provider.Id == "kimi" ? 60 : 12));
+            : provider.Id is "kimi" or "minimax" ? 60 : 12));
         if (IsDisposed || generation != _navigationGeneration || _activeProvider != provider
             || _capturedForNavigation) return;
         var snapshot = _service.Snapshot;
@@ -742,6 +899,7 @@ sealed class DomesticQuotaAuthForm : Form
             "qwen" => snapshot.QwenFetchedAt,
             "xiaomi" => snapshot.XiaomiFetchedAt,
             "kimi" => snapshot.KimiFetchedAt,
+            "minimax" => snapshot.MiniMaxFetchedAt,
             _ => null,
         };
         var last = fetchedAt.HasValue
@@ -782,23 +940,30 @@ sealed class DomesticQuotaAuthForm : Form
             var isKimi = _activeProvider?.Id == "kimi"
                 && (jsonRequest || isKimiUsage)
                 && uri.Contains("kimi", StringComparison.OrdinalIgnoreCase);
-            if (statusCode == 429 && (isAlibaba || isXiaomi || isKimi))
+            var isMiniMax = _activeProvider?.Id == "minimax"
+                && (jsonRequest || IsMiniMaxUsageEndpoint(uri))
+                && IsMiniMaxUsageEndpoint(uri);
+            if (statusCode == 429 && (isAlibaba || isXiaomi || isKimi || isMiniMax))
             {
-                var providerId = isAlibaba ? "qwen" : isXiaomi ? "xiaomi" : "kimi";
+                var providerId = isAlibaba ? "qwen" : isXiaomi ? "xiaomi"
+                    : isKimi ? "kimi" : "minimax";
                 _service.BackOff(providerId);
                 BeginInvoke(() => _status.Text = "供应商额度接口限流，5 分钟后自动重试；当前继续显示最近成功值。");
                 if (_backgroundRefresh) BeginInvoke(Hide);
                 return;
             }
-            if (requestId != null && (isAlibaba || isXiaomi || isKimi))
+            if (requestId != null && (isAlibaba || isXiaomi || isKimi || isMiniMax))
             {
                 var endpoint = Uri.TryCreate(uri, UriKind.Absolute, out var parsed)
                     ? parsed.Host + parsed.AbsolutePath : uri.Split('?')[0];
                 lock (_quotaResponses)
                     _quotaResponses[requestId] =
-                        (isAlibaba ? "qwen" : isXiaomi ? "xiaomi" : "kimi", endpoint);
+                        (isAlibaba ? "qwen" : isXiaomi ? "xiaomi"
+                            : isKimi ? "kimi" : "minimax", endpoint);
                 if (isKimiUsage)
                     Console.Error.WriteLine($"[quota] Kimi usage response detected: {endpoint}");
+                if (isMiniMax)
+                    Console.Error.WriteLine($"[quota] MiniMax usage response detected: {endpoint}");
             }
         }
         catch
@@ -853,6 +1018,19 @@ sealed class DomesticQuotaAuthForm : Form
                     $"[quota] Kimi updated: Weekly {weeklyPct:0.##}%, 5H "
                     + (fiveHourPct.HasValue ? $"{fiveHourPct.Value:0.##}%" : "--"));
             }
+            else if (responseInfo.ProviderId == "minimax")
+            {
+                var miniMax = FindMiniMaxUsage(doc.RootElement);
+                if (!miniMax.HasValue) return;
+                weeklyPct = miniMax.Value.WeeklyPct;
+                fiveHourPct = miniMax.Value.FiveHourPct;
+                membership = miniMax.Value.Membership;
+                _service.SetMiniMax(weeklyPct, fiveHourPct, membership,
+                    miniMax.Value.WeeklyResetAt, miniMax.Value.FiveHourResetAt);
+                Console.Error.WriteLine(
+                    $"[quota] MiniMax updated: Weekly {weeklyPct:0.##}%, 5H "
+                    + (fiveHourPct.HasValue ? $"{fiveHourPct.Value:0.##}%" : "--"));
+            }
             else
             {
                 if (responseInfo.ProviderId == "qwen")
@@ -868,12 +1046,16 @@ sealed class DomesticQuotaAuthForm : Form
                 else _service.SetXiaomi(pct.Value);
             }
             var responseProvider = ProviderById(responseInfo.ProviderId);
-            var loginSaved = responseInfo.ProviderId is "qwen" or "kimi"
+            var loginSaved = responseInfo.ProviderId is "qwen" or "kimi" or "minimax"
                 && await PersistLoginCookies(responseProvider.Url);
             _capturedForNavigation = true;
             BeginInvoke(() => _status.Text =
                 responseInfo.ProviderId == "kimi"
                     ? $"已取得 Kimi 准确用量：Weekly {weeklyPct:0.##}%"
+                        + (fiveHourPct.HasValue ? $"，5h {fiveHourPct.Value:0.##}%" : "")
+                        + "（已缓存）" + (loginSaved ? "；登录状态已持久保存" : "")
+                    : responseInfo.ProviderId == "minimax"
+                    ? $"已取得 MiniMax 准确用量：Weekly {weeklyPct:0.##}%"
                         + (fiveHourPct.HasValue ? $"，5h {fiveHourPct.Value:0.##}%" : "")
                         + "（已缓存）" + (loginSaved ? "；登录状态已持久保存" : "")
                     : $"已取得{(responseInfo.ProviderId == "qwen" ? "阿里云" : "小米")}准确用量：{weeklyPct:F1}%（已缓存）"
@@ -895,6 +1077,21 @@ sealed class DomesticQuotaAuthForm : Form
         if (!Uri.TryCreate(uri, UriKind.Absolute, out var parsed)) return false;
         return parsed.AbsolutePath.Contains("BillingService/GetUsage",
             StringComparison.OrdinalIgnoreCase);
+    }
+
+    static bool IsMiniMaxUsageEndpoint(string uri)
+    {
+        if (!Uri.TryCreate(uri, UriKind.Absolute, out var parsed)) return false;
+        var host = parsed.Host;
+        if (!host.Contains("minimax", StringComparison.OrdinalIgnoreCase)
+            && !host.Contains("minimaxi", StringComparison.OrdinalIgnoreCase))
+            return false;
+        var path = parsed.AbsolutePath;
+        return path.Contains("token_plan", StringComparison.OrdinalIgnoreCase)
+            || path.Contains("coding_plan", StringComparison.OrdinalIgnoreCase)
+            || path.Contains("model_remains", StringComparison.OrdinalIgnoreCase)
+            || path.Contains("usage", StringComparison.OrdinalIgnoreCase)
+            || path.Contains("remains", StringComparison.OrdinalIgnoreCase);
     }
 
     async Task<bool> PersistLoginCookies(string url)
@@ -921,6 +1118,8 @@ sealed class DomesticQuotaAuthForm : Form
         }
     }
 
+    internal readonly record struct MiniMaxUsage(double WeeklyPct, double? FiveHourPct,
+        string Membership, DateTimeOffset? WeeklyResetAt, DateTimeOffset? FiveHourResetAt);
     readonly record struct KimiUsage(double WeeklyPct, double? FiveHourPct,
         DateTimeOffset? WeeklyResetAt, DateTimeOffset? FiveHourResetAt);
     readonly record struct QwenUsage(double Pct, DateTimeOffset? ResetAt);
@@ -1101,6 +1300,129 @@ sealed class DomesticQuotaAuthForm : Form
         return null;
     }
 
+    internal static MiniMaxUsage? FindMiniMaxUsage(JsonElement element)
+    {
+        var candidates = new List<(MiniMaxUsage Usage, int Score)>();
+        CollectMiniMaxUsage(element, candidates);
+        return candidates.Count == 0
+            ? null
+            : candidates.OrderByDescending(item => item.Score).First().Usage;
+    }
+
+    static void CollectMiniMaxUsage(JsonElement element, List<(MiniMaxUsage Usage, int Score)> candidates)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var values = element.EnumerateObject().ToDictionary(p => p.Name, p => p.Value,
+                StringComparer.OrdinalIgnoreCase);
+            if (TryMiniMaxUsage(values) is (MiniMaxUsage Usage, int Score) candidate)
+                candidates.Add(candidate);
+            foreach (var child in values.Values)
+                if (child.ValueKind is JsonValueKind.Object or JsonValueKind.Array)
+                    CollectMiniMaxUsage(child, candidates);
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in element.EnumerateArray())
+                CollectMiniMaxUsage(child, candidates);
+        }
+    }
+
+    static (MiniMaxUsage Usage, int Score)? TryMiniMaxUsage(Dictionary<string, JsonElement> values)
+    {
+        var weeklyPct = MiniMaxPercent(values, "current_weekly")
+            ?? MiniMaxPercent(values, "weekly");
+        var fiveHourPct = MiniMaxPercent(values, "current_interval")
+            ?? MiniMaxPercent(values, "interval")
+            ?? MiniMaxPercent(values, "five_hour")
+            ?? MiniMaxPercent(values, "fiveHour");
+        if (!weeklyPct.HasValue) return null;
+
+        var weeklyResetAt = MiniMaxResetAt(values, "weekly_remains_time")
+            ?? MiniMaxResetAt(values, "current_weekly_remains_time")
+            ?? FindDirectResetAt(ObjectFromValues(values, "weekly"));
+        var fiveHourResetAt = MiniMaxResetAt(values, "remains_time")
+            ?? MiniMaxResetAt(values, "current_interval_remains_time")
+            ?? MiniMaxResetAt(values, "interval_remains_time");
+        var membership = FindMiniMaxMembership(values);
+        var score = 0;
+        if (values.TryGetValue("model_name", out var modelValue)
+            && modelValue.ValueKind == JsonValueKind.String)
+        {
+            var model = modelValue.GetString() ?? "";
+            if (model.Equals("general", StringComparison.OrdinalIgnoreCase)) score += 30;
+            if (!model.Contains("video", StringComparison.OrdinalIgnoreCase)
+                && !model.Contains("hailuo", StringComparison.OrdinalIgnoreCase)) score += 15;
+        }
+        if (fiveHourPct.HasValue) score += 10;
+        if (membership.Length > 0) score += 5;
+        return (new MiniMaxUsage(weeklyPct.Value, fiveHourPct, membership,
+            weeklyResetAt, fiveHourResetAt), score);
+    }
+
+    static JsonElement ObjectFromValues(Dictionary<string, JsonElement> values, string name)
+    {
+        return values.TryGetValue(name, out var value) ? value : default;
+    }
+
+    static DateTimeOffset? MiniMaxResetAt(Dictionary<string, JsonElement> values, string name)
+    {
+        if (!values.TryGetValue(name, out var value)) return null;
+        if (value.ValueKind == JsonValueKind.String)
+            return DomesticQuotaService.ParseResetAt(value.GetString());
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var seconds)
+            && seconds > 0 && seconds <= 31 * 24 * 3600)
+            return DateTimeOffset.Now.AddSeconds(seconds);
+        return DateTimeValue(value);
+    }
+
+    static string FindMiniMaxMembership(Dictionary<string, JsonElement> values)
+    {
+        foreach (var name in new[]
+                 {
+                     "combo_name", "plan_name", "plan_title", "current_subscribe_title",
+                     "subscribe_title", "subscription_name", "title"
+                 })
+        {
+            if (!values.TryGetValue(name, out var value)
+                || value.ValueKind != JsonValueKind.String) continue;
+            var text = value.GetString()?.Trim() ?? "";
+            if (text.Length is > 0 and <= 48) return text;
+        }
+        return "TOKEN PLAN";
+    }
+
+    static double? MiniMaxPercent(Dictionary<string, JsonElement> values, string prefix)
+    {
+        foreach (var name in new[]
+                 {
+                     $"{prefix}_used_percent", $"{prefix}_usage_percent",
+                     $"{prefix}_usagePercent", $"{prefix}_usedPercent"
+                 })
+            if (PercentNumber(values, name) is double used) return used;
+        foreach (var name in new[]
+                 {
+                     $"{prefix}_remaining_percent", $"{prefix}_remains_percent",
+                     $"{prefix}_remainingPercent", $"{prefix}_remainsPercent"
+                 })
+            if (PercentNumber(values, name) is double remaining) return 100 - remaining;
+
+        var total = Number(values, $"{prefix}_total_count")
+            ?? Number(values, $"{prefix}_total");
+        var usedCount = Number(values, $"{prefix}_usage_count")
+            ?? Number(values, $"{prefix}_used_count")
+            ?? Number(values, $"{prefix}_used");
+        var remainingCount = Number(values, $"{prefix}_remains_count")
+            ?? Number(values, $"{prefix}_remaining_count")
+            ?? Number(values, $"{prefix}_remaining");
+        if (total is > 0)
+        {
+            if (usedCount.HasValue) return 100 * usedCount.Value / total.Value;
+            if (remainingCount.HasValue) return 100 * (total.Value - remainingCount.Value) / total.Value;
+        }
+        return null;
+    }
+
     static double? PercentageFromRemaining(JsonElement detail)
     {
         if (detail.ValueKind != JsonValueKind.Object) return null;
@@ -1153,5 +1475,16 @@ sealed class DomesticQuotaAuthForm : Form
                 CultureInfo.InvariantCulture, out var parsed))
             return parsed;
         return null;
+    }
+
+    static double? PercentNumber(Dictionary<string, JsonElement> values, string name)
+    {
+        if (!values.TryGetValue(name, out var value)) return null;
+        if (value.ValueKind == JsonValueKind.Number) return value.GetDouble();
+        if (value.ValueKind != JsonValueKind.String) return null;
+        var text = (value.GetString() ?? "").Trim().TrimEnd('%');
+        return double.TryParse(text, NumberStyles.Float | NumberStyles.AllowThousands,
+            CultureInfo.InvariantCulture, out var parsed)
+            ? parsed : null;
     }
 }

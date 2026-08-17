@@ -71,6 +71,7 @@ class DomesticStatus
     public DomesticProviderStatus Qwen = new();
     public DomesticProviderStatus Xiaomi = new();
     public DomesticProviderStatus Kimi = new();
+    public DomesticProviderStatus MiniMax = new();
 }
 
 class StatusSnapshot
@@ -129,6 +130,7 @@ class StatusSnapshot
             WriteDomesticProvider(w, "qwen", Domestic.Qwen);
             WriteDomesticProvider(w, "xiaomi", Domestic.Xiaomi);
             WriteDomesticProvider(w, "kimi", Domestic.Kimi);
+            WriteDomesticProvider(w, "minimax", Domestic.MiniMax);
             w.WriteEndObject();
             w.WriteEndObject();
         }
@@ -178,7 +180,9 @@ class StatusSnapshot
         {
             "xiaomi" => domestic.Xiaomi,
             "kimi" => domestic.Kimi,
-            _ => domestic.Qwen,
+            "minimax" => domestic.MiniMax,
+            "" => new DomesticProviderStatus(),
+            _ => new DomesticProviderStatus(),
         };
     }
 
@@ -207,6 +211,7 @@ class StatusSnapshot
                 Qwen = (DomesticProviderStatus)Domestic.Qwen.MemberwiseCloneOf(),
                 Xiaomi = (DomesticProviderStatus)Domestic.Xiaomi.MemberwiseCloneOf(),
                 Kimi = (DomesticProviderStatus)Domestic.Kimi.MemberwiseCloneOf(),
+                MiniMax = (DomesticProviderStatus)Domestic.MiniMax.MemberwiseCloneOf(),
             },
             Ts = Ts,
             MusicPlaying = MusicPlaying,
@@ -238,7 +243,7 @@ sealed class StatusService
     /// log-derived values remain the fallback for offline use.
     public UsageFetcher Usage;
     public DomesticQuotaService DomesticUsage;
-    public string DomesticProviderOverride = "qwen";
+    public string DomesticProviderOverride = "";
     public Action CodexCompletion;
     public Action UrgentUpdate;
 
@@ -398,7 +403,8 @@ sealed class StatusService
         long ClaudeTokens, double ClaudeActivity,
         long QwenTokens, string QwenModel, double QwenActivity,
         long XiaomiTokens, string XiaomiModel, double XiaomiActivity,
-        long KimiTokens, string KimiModel, double KimiActivity);
+        long KimiTokens, string KimiModel, double KimiActivity,
+        long MiniMaxTokens, string MiniMaxModel, double MiniMaxActivity);
 
     // Claude Code JSONL files are append-only. Reuse the parsed aggregate until
     // the file mtime changes instead of rereading the full history every 5s.
@@ -545,6 +551,11 @@ sealed class StatusService
                 snap.Domestic.Kimi.FiveHourPct = du.KimiFiveHourPct;
                 snap.Domestic.Kimi.WeeklyResetMin = ResetMinutes(du.KimiWeeklyResetAt);
                 snap.Domestic.Kimi.FiveHourResetMin = ResetMinutes(du.KimiFiveHourResetAt);
+                snap.Domestic.MiniMax.PlanPct = du.MiniMaxWeeklyPct;
+                snap.Domestic.MiniMax.WeeklyPct = du.MiniMaxWeeklyPct;
+                snap.Domestic.MiniMax.FiveHourPct = du.MiniMaxFiveHourPct;
+                snap.Domestic.MiniMax.WeeklyResetMin = ResetMinutes(du.MiniMaxWeeklyResetAt);
+                snap.Domestic.MiniMax.FiveHourResetMin = ResetMinutes(du.MiniMaxFiveHourResetAt);
                 if (!string.IsNullOrWhiteSpace(du.QwenMembership))
                 {
                     snap.Domestic.Qwen.Model = QwenMembershipLabel(du.QwenMembership);
@@ -555,9 +566,15 @@ sealed class StatusService
                     snap.Domestic.Kimi.Model = du.KimiMembership;
                     snap.Domestic.Kimi.MembershipBadge = true;
                 }
+                if (!string.IsNullOrWhiteSpace(du.MiniMaxMembership))
+                {
+                    snap.Domestic.MiniMax.Model = du.MiniMaxMembership.ToUpperInvariant();
+                    snap.Domestic.MiniMax.MembershipBadge = true;
+                }
                 SetPercentDisplayText(snap.Domestic.Qwen);
                 SetPercentDisplayText(snap.Domestic.Xiaomi);
                 SetPercentDisplayText(snap.Domestic.Kimi);
+                SetPercentDisplayText(snap.Domestic.MiniMax);
                 if (DomesticProviderOverride.Length > 0)
                 {
                     snap.Domestic.ActiveProvider = DomesticProviderOverride;
@@ -565,6 +582,7 @@ sealed class StatusService
                     {
                         "xiaomi" => snap.Domestic.Xiaomi,
                         "kimi" => snap.Domestic.Kimi,
+                        "minimax" => snap.Domestic.MiniMax,
                         "qwen" => snap.Domestic.Qwen,
                         _ => new DomesticProviderStatus(),
                     };
@@ -572,9 +590,10 @@ sealed class StatusService
                 }
             }
             var domesticIsCurrent = snap.Domestic.ActiveProvider.Length > 0
-                && Math.Max(Math.Max(snap.Domestic.Qwen.LastActivityEpoch,
-                                     snap.Domestic.Xiaomi.LastActivityEpoch),
-                            snap.Domestic.Kimi.LastActivityEpoch) > now - IdleThreshold;
+                && Math.Max(Math.Max(Math.Max(snap.Domestic.Qwen.LastActivityEpoch,
+                                             snap.Domestic.Xiaomi.LastActivityEpoch),
+                                    snap.Domestic.Kimi.LastActivityEpoch),
+                            snap.Domestic.MiniMax.LastActivityEpoch) > now - IdleThreshold;
             if (domesticIsCurrent)
             {
                 snap.Domestic.Status = OverrideStatus(snap.Domestic.Status, _claudeEvent, now);
@@ -671,6 +690,8 @@ sealed class StatusService
         if (m.StartsWith("mimo") || m.Contains("/mimo") || m.Contains("xiaomi")) return "xiaomi";
         if (m.StartsWith("kimi") || m.Contains("/kimi") || m.StartsWith("moonshot")
             || m.Contains("/moonshot") || m == "k3") return "kimi";
+        if (m.StartsWith("minimax") || m.Contains("/minimax")
+            || m.StartsWith("abab") || m.Contains("/abab")) return "minimax";
         return "";
     }
 
@@ -791,6 +812,8 @@ sealed class StatusService
                     summary.XiaomiModel, summary.XiaomiActivity);
                 MergeDomesticFile(domestic.Kimi, summary.KimiTokens,
                     summary.KimiModel, summary.KimiActivity);
+                MergeDomesticFile(domestic.MiniMax, summary.MiniMaxTokens,
+                    summary.MiniMaxModel, summary.MiniMaxActivity);
             }
 
             var stale = _claudeFileCache.Keys.Where(path => !livePaths.Contains(path)).ToArray();
@@ -801,8 +824,10 @@ sealed class StatusService
         var qwenAt = domestic.Qwen.LastActivityEpoch;
         var xiaomiAt = domestic.Xiaomi.LastActivityEpoch;
         var kimiAt = domestic.Kimi.LastActivityEpoch;
-        var latestDomestic = Math.Max(Math.Max(qwenAt, xiaomiAt), kimiAt);
+        var miniMaxAt = domestic.MiniMax.LastActivityEpoch;
+        var latestDomestic = Math.Max(Math.Max(Math.Max(qwenAt, xiaomiAt), kimiAt), miniMaxAt);
         domestic.ActiveProvider = latestDomestic <= 0 ? ""
+            : miniMaxAt >= qwenAt && miniMaxAt >= xiaomiAt && miniMaxAt >= kimiAt ? "minimax"
             : kimiAt >= qwenAt && kimiAt >= xiaomiAt ? "kimi"
             : qwenAt >= xiaomiAt ? "qwen" : "xiaomi";
         domestic.Status = StatusFromDelta(latestDomestic > 0 ? now - latestDomestic : 1e9);
@@ -822,9 +847,9 @@ sealed class StatusService
 
     static ClaudeFileSummary ParseClaudeFile(string[] lines, double todayStart, double mtime)
     {
-        long claudeTokens = 0, qwenTokens = 0, xiaomiTokens = 0, kimiTokens = 0;
-        double claudeAt = 0, qwenAt = 0, xiaomiAt = 0, kimiAt = 0;
-        string qwenModel = "", xiaomiModel = "", kimiModel = "";
+        long claudeTokens = 0, qwenTokens = 0, xiaomiTokens = 0, kimiTokens = 0, miniMaxTokens = 0;
+        double claudeAt = 0, qwenAt = 0, xiaomiAt = 0, kimiAt = 0, miniMaxAt = 0;
+        string qwenModel = "", xiaomiModel = "", kimiModel = "", miniMaxModel = "";
         foreach (var line in lines)
         {
             if (!line.Contains("\"usage\":{")) continue;
@@ -859,16 +884,21 @@ sealed class StatusService
                     xiaomiTokens += tokens;
                     if (activity >= xiaomiAt) { xiaomiAt = activity; xiaomiModel = model; }
                 }
-                else
+                else if (provider == "kimi")
                 {
                     kimiTokens += tokens;
                     if (activity >= kimiAt) { kimiAt = activity; kimiModel = model; }
+                }
+                else if (provider == "minimax")
+                {
+                    miniMaxTokens += tokens;
+                    if (activity >= miniMaxAt) { miniMaxAt = activity; miniMaxModel = model; }
                 }
             }
         }
         return new ClaudeFileSummary(claudeTokens, claudeAt,
             qwenTokens, qwenModel, qwenAt, xiaomiTokens, xiaomiModel, xiaomiAt,
-            kimiTokens, kimiModel, kimiAt);
+            kimiTokens, kimiModel, kimiAt, miniMaxTokens, miniMaxModel, miniMaxAt);
     }
 
     // MARK: - Codex
