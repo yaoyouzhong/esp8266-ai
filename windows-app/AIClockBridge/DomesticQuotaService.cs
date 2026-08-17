@@ -23,7 +23,7 @@ static class DomesticProviderCatalog
         new("zhipu", "智谱 AI", "GLM / Coding Plan", "https://open.bigmodel.cn/usercenter", false),
         new("volcengine", "火山方舟", "豆包大模型", "https://console.volcengine.com/ark", false),
         new("minimax", "MiniMax", "MiniMax Token Plan", "https://platform.minimaxi.com/console/usage", true),
-        new("deepseek", "DeepSeek", "DeepSeek 开放平台", "https://platform.deepseek.com/usage", false),
+        new("deepseek", "DeepSeek", "DeepSeek 开放平台", "https://platform.deepseek.com/usage", true),
         new("baidu", "百度智能云", "千帆 / 文心", "https://console.bce.baidu.com/qianfan/overview", false),
         new("tencent", "腾讯云", "混元大模型", "https://console.cloud.tencent.com/hunyuan", false),
         new("huawei", "华为云", "盘古 / ModelArts", "https://console.huaweicloud.com/modelarts/", false),
@@ -44,6 +44,11 @@ sealed class DomesticQuotaSnapshot
     public double? KimiFiveHourPct;
     public double? MiniMaxWeeklyPct;
     public double? MiniMaxFiveHourPct;
+    public double? DeepSeekBalance;
+    public double? DeepSeekGrantedBalance;
+    public double? DeepSeekToppedUpBalance;
+    public double? DeepSeekUsedCost;
+    public string DeepSeekCurrency = "";
     public DateTimeOffset? QwenPlanResetAt;
     public DateTimeOffset? QwenWeeklyResetAt;
     public DateTimeOffset? QwenFiveHourResetAt;
@@ -58,6 +63,7 @@ sealed class DomesticQuotaSnapshot
     public DateTime? XiaomiFetchedAt;
     public DateTime? KimiFetchedAt;
     public DateTime? MiniMaxFetchedAt;
+    public DateTime? DeepSeekFetchedAt;
 }
 
 /// Reads the same read-only quota responses as the vendors' own account pages.
@@ -94,6 +100,11 @@ sealed class DomesticQuotaService
                 KimiFiveHourPct = _snapshot.KimiFiveHourPct,
                 MiniMaxWeeklyPct = _snapshot.MiniMaxWeeklyPct,
                 MiniMaxFiveHourPct = _snapshot.MiniMaxFiveHourPct,
+                DeepSeekBalance = _snapshot.DeepSeekBalance,
+                DeepSeekGrantedBalance = _snapshot.DeepSeekGrantedBalance,
+                DeepSeekToppedUpBalance = _snapshot.DeepSeekToppedUpBalance,
+                DeepSeekUsedCost = _snapshot.DeepSeekUsedCost,
+                DeepSeekCurrency = _snapshot.DeepSeekCurrency,
                 QwenPlanResetAt = _snapshot.QwenPlanResetAt,
                 QwenWeeklyResetAt = _snapshot.QwenWeeklyResetAt,
                 QwenFiveHourResetAt = _snapshot.QwenFiveHourResetAt,
@@ -108,6 +119,7 @@ sealed class DomesticQuotaService
                 XiaomiFetchedAt = _snapshot.XiaomiFetchedAt,
                 KimiFetchedAt = _snapshot.KimiFetchedAt,
                 MiniMaxFetchedAt = _snapshot.MiniMaxFetchedAt,
+                DeepSeekFetchedAt = _snapshot.DeepSeekFetchedAt,
             };
         }
     }
@@ -276,6 +288,22 @@ sealed class DomesticQuotaService
             if (!string.IsNullOrWhiteSpace(membership))
                 _snapshot.MiniMaxMembership = membership.Trim();
             _snapshot.MiniMaxFetchedAt = DateTime.UtcNow;
+            Save();
+        }
+    }
+
+    internal void SetDeepSeek(double balance, string currency, double? granted = null,
+        double? toppedUp = null, double? usedCost = null)
+    {
+        lock (_lock)
+        {
+            _snapshot.DeepSeekBalance = Math.Max(0, balance);
+            _snapshot.DeepSeekGrantedBalance = granted.HasValue ? Math.Max(0, granted.Value) : null;
+            _snapshot.DeepSeekToppedUpBalance = toppedUp.HasValue ? Math.Max(0, toppedUp.Value) : null;
+            if (usedCost.HasValue) _snapshot.DeepSeekUsedCost = Math.Max(0, usedCost.Value);
+            _snapshot.DeepSeekCurrency = string.IsNullOrWhiteSpace(currency)
+                ? "CNY" : currency.Trim().ToUpperInvariant();
+            _snapshot.DeepSeekFetchedAt = DateTime.UtcNow;
             Save();
         }
     }
@@ -586,7 +614,8 @@ sealed class DomesticQuotaAuthForm : Form
     {
         if (_hideOnUserClose && e.CloseReason == CloseReason.UserClosing)
         {
-            if (_activeProvider?.Id is "qwen" or "kimi" or "minimax") _ = PersistLoginCookies(_activeProvider.Url);
+            if (_activeProvider?.Id is "qwen" or "kimi" or "minimax" or "deepseek")
+                _ = PersistLoginCookies(_activeProvider.Url);
             e.Cancel = true;
             Hide();
             return;
@@ -705,7 +734,7 @@ sealed class DomesticQuotaAuthForm : Form
             _finishedReceiver.DevToolsProtocolEventReceived += CdpLoadingFinished;
             _web.CoreWebView2.NavigationCompleted += async (_, e) =>
             {
-                if (e.IsSuccess && _activeProvider?.Id is "qwen" or "kimi" or "minimax")
+                if (e.IsSuccess && _activeProvider?.Id is "qwen" or "kimi" or "minimax" or "deepseek")
                     await PersistLoginCookies(_activeProvider.Url);
                 if (e.IsSuccess && _activeProvider?.Id == "kimi")
                     _ = CaptureKimiPageMetadata(_navigationGeneration);
@@ -713,6 +742,8 @@ sealed class DomesticQuotaAuthForm : Form
                 {
                     _ = CaptureQwenPageMetadata(_navigationGeneration);
                 }
+                if (e.IsSuccess && _activeProvider?.Id == "deepseek")
+                    _ = CaptureDeepSeekPageMetadata(_navigationGeneration);
             };
         }
         _status.Text = provider.Id == "minimax" && _service.HasMiniMaxApiKey
@@ -883,6 +914,70 @@ sealed class DomesticQuotaAuthForm : Form
         }
     }
 
+    async Task CaptureDeepSeekPageMetadata(int generation)
+    {
+        const string script = """
+            (() => {
+              const text = document.body ? document.body.innerText : '';
+              const patterns = [
+                /(?:可用余额|账户余额|总余额)\s*[：:]?\s*([¥￥$])?\s*(\d+(?:\.\d+)?)/i,
+                /(?:available\s+balance|account\s+balance|total\s+balance)\s*[：:]?\s*([¥￥$])?\s*(\d+(?:\.\d+)?)/i
+              ];
+              for (const pattern of patterns) {
+                const match = text.match(pattern);
+                if (match) return {
+                  balance: Number(match[2]),
+                  currency: match[1] === '$' ? 'USD' : 'CNY'
+                };
+              }
+              return { balance: null, currency: '' };
+            })()
+            """;
+        double? previousBalance = null;
+        var previousCurrency = "";
+        var stableReadCount = 0;
+        for (var attempt = 0; attempt < 100; attempt++)
+        {
+            if (IsDisposed || generation != _navigationGeneration
+                || _activeProvider?.Id != "deepseek" || _web.CoreWebView2 == null
+                || _capturedForNavigation) return;
+            try
+            {
+                var result = await _web.CoreWebView2.ExecuteScriptAsync(script);
+                using var doc = JsonDocument.Parse(result);
+                var root = doc.RootElement;
+                var balance = root.TryGetProperty("balance", out var balanceValue)
+                    && balanceValue.ValueKind == JsonValueKind.Number
+                    ? balanceValue.GetDouble() : (double?)null;
+                var currency = root.TryGetProperty("currency", out var currencyValue)
+                    ? currencyValue.GetString()?.Trim() ?? "" : "";
+                if (balance.HasValue)
+                {
+                    stableReadCount = balance == previousBalance && currency == previousCurrency
+                        ? stableReadCount + 1 : 1;
+                    previousBalance = balance;
+                    previousCurrency = currency;
+                    if (stableReadCount >= 2)
+                    {
+                        _service.SetDeepSeek(balance.Value, currency);
+                        _capturedForNavigation = true;
+                        Console.Error.WriteLine(
+                            $"[quota] DeepSeek DOM updated: {currency} {balance.Value:0.00}");
+                        BeginInvoke(() => _status.Text =
+                            $"已取得 DeepSeek 可用余额：{currency} {balance.Value:0.00}（已缓存）");
+                        if (_backgroundRefresh) BeginInvoke(Hide);
+                        return;
+                    }
+                }
+            }
+            catch
+            {
+                // The console may still be rendering its billing card.
+            }
+            await Task.Delay(500);
+        }
+    }
+
     async Task ShowPendingStatus(DomesticProviderDefinition provider, int generation)
     {
         // Kimi's console now loads its Connect usage service after the main
@@ -890,7 +985,7 @@ sealed class DomesticQuotaAuthForm : Form
         // WebView before BillingService/GetUsage completed, leaving both
         // Weekly and 5H stuck on the last successful cache.
         await Task.Delay(TimeSpan.FromSeconds(provider.Id == "qwen" ? 45
-            : provider.Id is "kimi" or "minimax" ? 60 : 12));
+            : provider.Id is "kimi" or "minimax" or "deepseek" ? 60 : 12));
         if (IsDisposed || generation != _navigationGeneration || _activeProvider != provider
             || _capturedForNavigation) return;
         var snapshot = _service.Snapshot;
@@ -900,6 +995,7 @@ sealed class DomesticQuotaAuthForm : Form
             "xiaomi" => snapshot.XiaomiFetchedAt,
             "kimi" => snapshot.KimiFetchedAt,
             "minimax" => snapshot.MiniMaxFetchedAt,
+            "deepseek" => snapshot.DeepSeekFetchedAt,
             _ => null,
         };
         var last = fetchedAt.HasValue
@@ -943,27 +1039,34 @@ sealed class DomesticQuotaAuthForm : Form
             var isMiniMax = _activeProvider?.Id == "minimax"
                 && (jsonRequest || IsMiniMaxUsageEndpoint(uri))
                 && IsMiniMaxUsageEndpoint(uri);
-            if (statusCode == 429 && (isAlibaba || isXiaomi || isKimi || isMiniMax))
+            var isDeepSeek = _activeProvider?.Id == "deepseek"
+                && (resourceType == "XHR" || resourceType == "Fetch")
+                && Uri.TryCreate(uri, UriKind.Absolute, out var deepSeekUri)
+                && deepSeekUri.Host.Contains("deepseek", StringComparison.OrdinalIgnoreCase)
+                && (jsonRequest || IsDeepSeekUsageEndpoint(uri));
+            if (statusCode == 429 && (isAlibaba || isXiaomi || isKimi || isMiniMax || isDeepSeek))
             {
                 var providerId = isAlibaba ? "qwen" : isXiaomi ? "xiaomi"
-                    : isKimi ? "kimi" : "minimax";
+                    : isKimi ? "kimi" : isMiniMax ? "minimax" : "deepseek";
                 _service.BackOff(providerId);
                 BeginInvoke(() => _status.Text = "供应商额度接口限流，5 分钟后自动重试；当前继续显示最近成功值。");
                 if (_backgroundRefresh) BeginInvoke(Hide);
                 return;
             }
-            if (requestId != null && (isAlibaba || isXiaomi || isKimi || isMiniMax))
+            if (requestId != null && (isAlibaba || isXiaomi || isKimi || isMiniMax || isDeepSeek))
             {
                 var endpoint = Uri.TryCreate(uri, UriKind.Absolute, out var parsed)
                     ? parsed.Host + parsed.AbsolutePath : uri.Split('?')[0];
                 lock (_quotaResponses)
                     _quotaResponses[requestId] =
                         (isAlibaba ? "qwen" : isXiaomi ? "xiaomi"
-                            : isKimi ? "kimi" : "minimax", endpoint);
+                            : isKimi ? "kimi" : isMiniMax ? "minimax" : "deepseek", endpoint);
                 if (isKimiUsage)
                     Console.Error.WriteLine($"[quota] Kimi usage response detected: {endpoint}");
                 if (isMiniMax)
                     Console.Error.WriteLine($"[quota] MiniMax usage response detected: {endpoint}");
+                if (isDeepSeek)
+                    Console.Error.WriteLine($"[quota] DeepSeek balance response detected: {endpoint}");
             }
         }
         catch
@@ -1031,6 +1134,18 @@ sealed class DomesticQuotaAuthForm : Form
                     $"[quota] MiniMax updated: Weekly {weeklyPct:0.##}%, 5H "
                     + (fiveHourPct.HasValue ? $"{fiveHourPct.Value:0.##}%" : "--"));
             }
+            else if (responseInfo.ProviderId == "deepseek")
+            {
+                var deepSeek = FindDeepSeekBalance(doc.RootElement);
+                if (!deepSeek.HasValue) return;
+                var usedCost = FindDeepSeekUsedCost(doc.RootElement, deepSeek.Value.Currency);
+                _service.SetDeepSeek(deepSeek.Value.Total, deepSeek.Value.Currency,
+                    deepSeek.Value.Granted, deepSeek.Value.ToppedUp, usedCost);
+                weeklyPct = 0;
+                membership = deepSeek.Value.Currency;
+                Console.Error.WriteLine(
+                    $"[quota] DeepSeek updated: {deepSeek.Value.Currency} {deepSeek.Value.Total:0.00}");
+            }
             else
             {
                 if (responseInfo.ProviderId == "qwen")
@@ -1046,7 +1161,7 @@ sealed class DomesticQuotaAuthForm : Form
                 else _service.SetXiaomi(pct.Value);
             }
             var responseProvider = ProviderById(responseInfo.ProviderId);
-            var loginSaved = responseInfo.ProviderId is "qwen" or "kimi" or "minimax"
+            var loginSaved = responseInfo.ProviderId is "qwen" or "kimi" or "minimax" or "deepseek"
                 && await PersistLoginCookies(responseProvider.Url);
             _capturedForNavigation = true;
             BeginInvoke(() => _status.Text =
@@ -1058,6 +1173,10 @@ sealed class DomesticQuotaAuthForm : Form
                     ? $"已取得 MiniMax 准确用量：Weekly {weeklyPct:0.##}%"
                         + (fiveHourPct.HasValue ? $"，5h {fiveHourPct.Value:0.##}%" : "")
                         + "（已缓存）" + (loginSaved ? "；登录状态已持久保存" : "")
+                    : responseInfo.ProviderId == "deepseek"
+                    ? $"已取得 DeepSeek 可用余额：{membership} "
+                        + $"{_service.Snapshot.DeepSeekBalance:0.00}（已缓存）"
+                        + (loginSaved ? "；登录状态已持久保存" : "")
                     : $"已取得{(responseInfo.ProviderId == "qwen" ? "阿里云" : "小米")}准确用量：{weeklyPct:F1}%（已缓存）"
                     + (responseInfo.ProviderId == "qwen" && !string.IsNullOrWhiteSpace(membership)
                         ? $"；订阅：{membership}" : "")
@@ -1094,6 +1213,17 @@ sealed class DomesticQuotaAuthForm : Form
             || path.Contains("remains", StringComparison.OrdinalIgnoreCase);
     }
 
+    static bool IsDeepSeekUsageEndpoint(string uri)
+    {
+        if (!Uri.TryCreate(uri, UriKind.Absolute, out var parsed)
+            || !parsed.Host.Contains("deepseek", StringComparison.OrdinalIgnoreCase)) return false;
+        var path = parsed.AbsolutePath;
+        return path.Contains("balance", StringComparison.OrdinalIgnoreCase)
+            || path.Contains("billing", StringComparison.OrdinalIgnoreCase)
+            || path.Contains("usage", StringComparison.OrdinalIgnoreCase)
+            || path.Contains("account", StringComparison.OrdinalIgnoreCase);
+    }
+
     async Task<bool> PersistLoginCookies(string url)
     {
         if (_web.CoreWebView2 == null) return false;
@@ -1120,9 +1250,95 @@ sealed class DomesticQuotaAuthForm : Form
 
     internal readonly record struct MiniMaxUsage(double WeeklyPct, double? FiveHourPct,
         string Membership, DateTimeOffset? WeeklyResetAt, DateTimeOffset? FiveHourResetAt);
+    internal readonly record struct DeepSeekBalance(double Total, double? Granted,
+        double? ToppedUp, string Currency);
     readonly record struct KimiUsage(double WeeklyPct, double? FiveHourPct,
         DateTimeOffset? WeeklyResetAt, DateTimeOffset? FiveHourResetAt);
     readonly record struct QwenUsage(double Pct, DateTimeOffset? ResetAt);
+
+    internal static DeepSeekBalance? FindDeepSeekBalance(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var values = element.EnumerateObject().ToDictionary(p => p.Name, p => p.Value,
+                StringComparer.OrdinalIgnoreCase);
+            if (values.TryGetValue("balance_infos", out var infos)
+                && infos.ValueKind == JsonValueKind.Array)
+            {
+                DeepSeekBalance? first = null;
+                foreach (var info in infos.EnumerateArray())
+                {
+                    var parsed = ParseDeepSeekBalanceObject(info);
+                    if (!parsed.HasValue) continue;
+                    first ??= parsed;
+                    if (parsed.Value.Currency == "CNY") return parsed;
+                }
+                if (first.HasValue) return first;
+            }
+            if (ParseDeepSeekBalanceObject(element) is DeepSeekBalance direct) return direct;
+            foreach (var child in values.Values)
+                if (FindDeepSeekBalance(child) is DeepSeekBalance found) return found;
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in element.EnumerateArray())
+                if (FindDeepSeekBalance(child) is DeepSeekBalance found) return found;
+        }
+        return null;
+    }
+
+    static DeepSeekBalance? ParseDeepSeekBalanceObject(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object) return null;
+        var values = element.EnumerateObject().ToDictionary(p => p.Name, p => p.Value,
+            StringComparer.OrdinalIgnoreCase);
+        var total = Number(values, "total_balance") ?? Number(values, "available_balance")
+            ?? Number(values, "balance");
+        if (!total.HasValue || total.Value < 0) return null;
+        var currency = values.TryGetValue("currency", out var currencyValue)
+            && currencyValue.ValueKind == JsonValueKind.String
+            ? currencyValue.GetString()?.Trim().ToUpperInvariant() ?? "" : "";
+        if (currency is not ("CNY" or "USD")) currency = "CNY";
+        return new DeepSeekBalance(total.Value, Number(values, "granted_balance"),
+            Number(values, "topped_up_balance"), currency);
+    }
+
+    internal static double? FindDeepSeekUsedCost(JsonElement element, string currency)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var values = element.EnumerateObject().ToDictionary(p => p.Name, p => p.Value,
+                StringComparer.OrdinalIgnoreCase);
+            if (values.TryGetValue("total_costs", out var costs)
+                && costs.ValueKind == JsonValueKind.Array)
+            {
+                double? first = null;
+                foreach (var cost in costs.EnumerateArray())
+                {
+                    if (cost.ValueKind != JsonValueKind.Object) continue;
+                    var costValues = cost.EnumerateObject().ToDictionary(p => p.Name, p => p.Value,
+                        StringComparer.OrdinalIgnoreCase);
+                    var amount = Number(costValues, "amount");
+                    if (!amount.HasValue) continue;
+                    first ??= amount;
+                    var itemCurrency = costValues.TryGetValue("currency", out var currencyValue)
+                        && currencyValue.ValueKind == JsonValueKind.String
+                        ? currencyValue.GetString()?.Trim() ?? "" : "";
+                    if (itemCurrency.Equals(currency, StringComparison.OrdinalIgnoreCase))
+                        return amount;
+                }
+                if (first.HasValue) return first;
+            }
+            foreach (var child in values.Values)
+                if (FindDeepSeekUsedCost(child, currency) is double found) return found;
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in element.EnumerateArray())
+                if (FindDeepSeekUsedCost(child, currency) is double found) return found;
+        }
+        return null;
+    }
 
     static QwenUsage? FindQwenUsage(JsonElement element)
     {

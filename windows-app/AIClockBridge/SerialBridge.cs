@@ -575,6 +575,10 @@ sealed class SerialBridge : IDisposable
         Send("set_brightness", new() { ["level"] = level });
     }
     public void PushWeather() { if (_weather != null) SendRaw("weather", _weather.ToJson()); }
+    public void PushFullStatusNow()
+    {
+        if (Connected && _telemetryEnabled) SendRaw("status", _status.Snapshot().ToJson());
+    }
     public void PushStatusNow()
     {
         if (!Connected || !_telemetryEnabled) return;

@@ -289,6 +289,9 @@ struct DomesticProviderStatus {
   int weeklyResetMin = -1;
   uint32_t planResetAt = 0;
   int planResetMin = -1;
+  float balance = -1;
+  float usedCost = -1;
+  String currency;
 };
 
 struct DomesticStatus {
@@ -302,6 +305,7 @@ struct DomesticStatus {
   DomesticProviderStatus xiaomi;
   DomesticProviderStatus kimi;
   DomesticProviderStatus minimax;
+  DomesticProviderStatus deepseek;
 };
 
 ClaudeStatus claudeStatus;
@@ -1321,6 +1325,7 @@ struct DomesticDrawCache {
   String plan;
   String remaining;
   bool windowed = false;
+  bool balance = false;
   bool initialized = false;
 };
 
@@ -1331,17 +1336,19 @@ void drawDomesticScreen(bool force = false) {
   String provider = domesticStatus.activeProvider.length() ? domesticStatus.activeProvider : "qwen";
   provider.toUpperCase();
   bool isKimi = provider == "KIMI";
+  bool isBalance = provider == "DEEPSEEK" && p.balance >= 0;
   bool isWindowed = isKimi || p.fiveHourPct >= 0 || p.weeklyPct >= 0;
   String model = p.model.length() ? fitDomesticText(p.model, 112, 2) : "--";
   float displayPct = isWindowed && p.weeklyPct >= 0 ? p.weeklyPct : p.planPct;
-  String tokens = isWindowed
+  String tokens = isBalance
+      ? (p.usedCost >= 0 ? String(p.usedCost, 2) + " " + p.currency : "--") : isWindowed
       ? (p.fiveHourPct >= 0 ? String((int)p.fiveHourPct) + "%" : "--")
       : domesticPlanResetText(p.planResetAt, p.planResetMin);
   String reset = isWindowed ? quotaResetText(p.fiveHourResetMin) : "";
-  String planNumber = displayPct >= 0
+  String planNumber = isBalance ? String(p.balance, 2) : displayPct >= 0
       ? (!isWindowed && p.planPctText.length() ? p.planPctText : String((int)displayPct)) : "--";
-  String plan = displayPct >= 0 ? planNumber + "%" : "--";
-  String remaining = isWindowed ? quotaResetText(p.weeklyResetMin)
+  String plan = isBalance ? planNumber + p.currency : displayPct >= 0 ? planNumber + "%" : "--";
+  String remaining = isBalance ? "DEEPSEEK" : isWindowed ? quotaResetText(p.weeklyResetMin)
       : p.planPct >= 0
           ? (p.remainingPctText.length() ? p.remainingPctText
               : String(floorf(max(0.0f, 100.0f - p.planPct) * 100.0f) / 100.0f, 2)) + "% LEFT"
@@ -1361,9 +1368,9 @@ void drawDomesticScreen(bool force = false) {
     tft.drawRoundRect(20, 177, 200, 38, 8, 0x29A5);
     tft.setTextDatum(TL_DATUM);
   }
-  drawSquareRing(max(displayPct, 0.0f), TFT_GREEN);
+  drawSquareRing(isBalance ? 0.0f : max(displayPct, 0.0f), TFT_GREEN);
   if (force || !domesticDrawCache.initialized || provider != domesticDrawCache.provider
-      || isWindowed != domesticDrawCache.windowed) {
+      || isWindowed != domesticDrawCache.windowed || isBalance != domesticDrawCache.balance) {
     tft.fillRect(34, 20, 72, 22, TFT_BLACK);
     tft.setTextDatum(TL_DATUM);
     drawBoldString(provider, 36, 24, 2, TFT_GREEN);
@@ -1371,9 +1378,12 @@ void drawDomesticScreen(bool force = false) {
     tft.fillRect(contentLeft, 69, SCREEN_W - contentLeft * 2, 16, TFT_BLACK);
     tft.setTextDatum(TC_DATUM);
     tft.setTextColor(mutedColor, TFT_BLACK);
-    tft.drawString(isWindowed ? "WEEKLY" : "PLAN", SCREEN_CX, 73, 1);
+    tft.drawString(isBalance ? "AVAILABLE BALANCE" : isWindowed ? "WEEKLY" : "PLAN", SCREEN_CX, 73, 1);
     tft.fillRect(28, 181, 76, 31, panelColor);
-    if (isWindowed) {
+    if (isBalance) {
+      tft.setTextDatum(MC_DATUM);
+      drawBoldString("USED", 53, 196, 2, TFT_GREEN);
+    } else if (isWindowed) {
       tft.setTextDatum(MC_DATUM);
       drawBoldString("5H", 53, 196, 2, TFT_GREEN);
     } else {
@@ -1406,28 +1416,46 @@ void drawDomesticScreen(bool force = false) {
     int numberY = numberFont == 7 ? 90 : numberFont == 4 ? 101 : 108;
     int percentY = numberFont == 7 ? 105 : numberFont == 4 ? 108 : 108;
     int numberWidth = tft.textWidth(planNumber, numberFont);
-    int percentWidth = displayPct >= 0 ? tft.textWidth("%", percentFont) : 0;
+    String suffix = isBalance ? p.currency : "%";
+    int percentWidth = isBalance || displayPct >= 0 ? tft.textWidth(suffix, percentFont) : 0;
     int left = SCREEN_CX - (numberWidth + (percentWidth ? 4 + percentWidth : 0)) / 2;
     tft.setTextDatum(TL_DATUM);
     drawBoldString(planNumber, left, numberY, numberFont, numberColor);
     if (percentWidth) {
       tft.setTextColor(TFT_GREEN, TFT_BLACK);
-      tft.drawString("%", left + numberWidth + 4, percentY, percentFont);
+      tft.drawString(suffix, left + numberWidth + 4, percentY, percentFont);
     }
   }
   if (force || !domesticDrawCache.initialized || remaining != domesticDrawCache.remaining) {
     tft.fillRect(30, 151, 180, 16, TFT_BLACK);
     tft.setTextDatum(TL_DATUM);
     tft.setTextColor(mutedColor, TFT_BLACK);
-    tft.drawString(isWindowed ? "RESET" : "REMAINING", 37, 153, 1);
+    tft.drawString(isBalance ? "SOURCE" : isWindowed ? "RESET" : "REMAINING", 37, 153, 1);
     tft.setTextDatum(TR_DATUM);
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
     tft.drawString(remaining, 203, 151, 2);
   }
   if (force || !domesticDrawCache.initialized || tokens != domesticDrawCache.tokens
-      || reset != domesticDrawCache.reset || isWindowed != domesticDrawCache.windowed) {
+      || reset != domesticDrawCache.reset || isWindowed != domesticDrawCache.windowed
+      || isBalance != domesticDrawCache.balance) {
     tft.fillRect(87, 181, 131, 29, panelColor);
-    if (isWindowed) {
+    if (isBalance) {
+      tft.setTextDatum(MC_DATUM);
+      if (p.usedCost >= 0) {
+        String amount = String(p.usedCost, 2);
+        int amountWidth = tft.textWidth(amount, 2);
+        int currencyWidth = tft.textWidth(p.currency, 2);
+        int gap = p.currency.length() ? 5 : 0;
+        int left = 153 - (amountWidth + gap + currencyWidth) / 2;
+        tft.setTextDatum(ML_DATUM);
+        drawBoldString(amount, left, 196, 2, numberColor);
+        if (currencyWidth) {
+          drawBoldString(p.currency, left + amountWidth + gap, 196, 2, mutedColor);
+        }
+      } else {
+        drawBoldString("--", 153, 196, 2, numberColor);
+      }
+    } else if (isWindowed) {
       tft.setTextDatum(MC_DATUM);
       drawBoldString(tokens, 120, 196, 2, TFT_WHITE);
       drawBoldString(reset, 187, 196, 2, TFT_CYAN);
@@ -1443,6 +1471,7 @@ void drawDomesticScreen(bool force = false) {
   domesticDrawCache.plan = plan;
   domesticDrawCache.remaining = remaining;
   domesticDrawCache.windowed = isWindowed;
+  domesticDrawCache.balance = isBalance;
   domesticDrawCache.initialized = true;
 }
 
@@ -2309,6 +2338,9 @@ void readDomesticProvider(JsonObject source, DomesticProviderStatus &target) {
   target.weeklyResetMin = source["weekly_reset_min"] | -1;
   target.planResetAt = source["plan_reset_at"] | 0UL;
   target.planResetMin = source["plan_reset_min"] | -1;
+  target.balance = source["balance"] | -1.0;
+  target.usedCost = source["used_cost"] | -1.0;
+  target.currency = source["currency"] | "";
 }
 
 void applyCodexCompletionState(uint32_t incomingCompletionAt,
@@ -2385,11 +2417,13 @@ bool parseStatusJson(const String &payload, bool applyAlertState = true) {
     readDomesticProvider(d["xiaomi"], domesticStatus.xiaomi);
     readDomesticProvider(d["kimi"], domesticStatus.kimi);
     readDomesticProvider(d["minimax"], domesticStatus.minimax);
+    readDomesticProvider(d["deepseek"], domesticStatus.deepseek);
     JsonObject active = d["active"];
     if (!active.isNull()) readDomesticProvider(active, domesticStatus.active);
     else if (domesticStatus.activeProvider == "xiaomi") domesticStatus.active = domesticStatus.xiaomi;
     else if (domesticStatus.activeProvider == "kimi") domesticStatus.active = domesticStatus.kimi;
     else if (domesticStatus.activeProvider == "minimax") domesticStatus.active = domesticStatus.minimax;
+    else if (domesticStatus.activeProvider == "deepseek") domesticStatus.active = domesticStatus.deepseek;
     else domesticStatus.active = domesticStatus.qwen;
   }
   statusMusicPlaying = doc["music_playing"] | false;
@@ -2648,6 +2682,10 @@ String deviceInfoJson() {
   domestic["qwen_model"] = domesticStatus.qwen.model;
   domestic["kimi_model"] = domesticStatus.kimi.model;
   domestic["minimax_model"] = domesticStatus.minimax.model;
+  domestic["deepseek_model"] = domesticStatus.deepseek.model;
+  domestic["deepseek_balance"] = domesticStatus.deepseek.balance;
+  domestic["deepseek_used_cost"] = domesticStatus.deepseek.usedCost;
+  domestic["deepseek_currency"] = domesticStatus.deepseek.currency;
   JsonObject cache = doc["ui_cache"].to<JsonObject>();
   cache["stock"] = LittleFS.exists(STOCK_UI_CACHE_FILE);
   cache["weather"] = LittleFS.exists(WEATHER_UI_CACHE_FILE);

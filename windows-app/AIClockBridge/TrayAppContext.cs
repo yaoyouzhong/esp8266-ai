@@ -86,8 +86,8 @@ sealed class TrayAppContext : ApplicationContext
         _port = port;
         _mirror = new MirrorForm(service, netMonitor, nowPlaying, stocks, weather);
 
-        LoadCycleSettings();
         LoadDomesticProviderSettings();
+        LoadCycleSettings();
         LoadScreenSaverSettings();
         _cycleTimer.Tick += async (_, _) => await AdvanceCycle();
         _screenSaverTimer.Tick += async (_, _) => await ScreenSaverTick();
@@ -213,9 +213,34 @@ sealed class TrayAppContext : ApplicationContext
         KeepOpenOnClick(_cycleEnabledItem);
         cycleMenu.DropDownItems.Add(_cycleEnabledItem);
         var cyclePagesMenu = new ToolStripMenuItem("循环页面");
+        var configuredCyclePages = ConfiguredCyclePages().ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var (title, mode) in CycleModes)
         {
-            var item = new ToolStripMenuItem(title) { CheckOnClick = true, Checked = CyclePages().Contains(mode) };
+            if (mode == "domestic")
+            {
+                var domesticCycleMenu = new ToolStripMenuItem(title);
+                foreach (var provider in DomesticProviderCatalog.All.Where(x => x.CaptureSupported))
+                {
+                    var entry = DomesticCycleEntry(provider.Id);
+                    var providerItem = new ToolStripMenuItem(provider.Name)
+                    {
+                        CheckOnClick = true,
+                        Checked = configuredCyclePages.Contains(entry),
+                    };
+                    providerItem.CheckedChanged += (_, _) => SaveCyclePages();
+                    KeepOpenOnClick(providerItem);
+                    _cyclePageItems[entry] = providerItem;
+                    domesticCycleMenu.DropDownItems.Add(providerItem);
+                }
+                KeepOpenWhileSetting(domesticCycleMenu.DropDown);
+                cyclePagesMenu.DropDownItems.Add(domesticCycleMenu);
+                continue;
+            }
+            var item = new ToolStripMenuItem(title)
+            {
+                CheckOnClick = true,
+                Checked = configuredCyclePages.Contains(mode),
+            };
             item.CheckedChanged += (_, _) => SaveCyclePages();
             KeepOpenOnClick(item);
             _cyclePageItems[mode] = item;
@@ -342,6 +367,11 @@ sealed class TrayAppContext : ApplicationContext
             if (Settings.Get(CyclePagesKey).Length == 0)
                 Settings.Set(CyclePagesKey, string.Join(",", DefaultCycleModes));
         }
+        if (Settings.Get(CyclePagesKey).Split(',', StringSplitOptions.RemoveEmptyEntries
+                | StringSplitOptions.TrimEntries).Contains("domestic", StringComparer.OrdinalIgnoreCase))
+        {
+            Settings.Set(CyclePagesKey, string.Join(",", ConfiguredCyclePages()));
+        }
         _cycleIntervalSeconds = int.TryParse(Settings.Get(CycleIntervalKey), out var seconds)
             && new[] { 10, 15, 30, 60 }.Contains(seconds) ? seconds : 15;
         _cycleTimer.Interval = _cycleIntervalSeconds * 1000;
@@ -363,12 +393,19 @@ sealed class TrayAppContext : ApplicationContext
 
     async Task SetDomesticProvider(string provider)
     {
+        ActivateDomesticProvider(provider, forceRefresh: true);
+        await SetDisplayMode("domestic");
+    }
+
+    void ActivateDomesticProvider(string provider, bool forceRefresh = false)
+    {
+        if (!DomesticProviderCatalog.All.Any(x => x.Id == provider)) return;
         _domesticProvider = provider;
         _service.DomesticProviderOverride = provider;
         Settings.Set(DomesticProviderKey, provider);
         UpdateDomesticProviderMenu();
-        _domesticUsage.Refresh(provider, force: true);
-        await SetDisplayMode("domestic");
+        _domesticUsage.Refresh(provider, force: forceRefresh);
+        DeviceClient.Usb?.PushFullStatusNow();
     }
 
     void LoadScreenSaverSettings()
@@ -522,18 +559,62 @@ sealed class TrayAppContext : ApplicationContext
         finally { _screenSaverBusy = false; }
     }
 
-    List<string> CyclePages()
+    static string DomesticCycleEntry(string provider) => $"domestic:{provider}";
+
+    static bool TryDomesticCycleEntry(string entry, out string provider)
     {
-        var valid = CycleModes.Select(x => x.Mode).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var saved = Settings.Get(CyclePagesKey)
+        const string prefix = "domestic:";
+        if (entry.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            var candidate = entry[prefix.Length..];
+            if (DomesticProviderCatalog.All.Any(x => x.Id == candidate && x.CaptureSupported))
+            {
+                provider = candidate;
+                return true;
+            }
+        }
+        provider = "";
+        return false;
+    }
+
+    static List<(string Title, string Mode)> CycleCatalog()
+    {
+        var catalog = new List<(string Title, string Mode)>();
+        foreach (var entry in CycleModes)
+        {
+            if (entry.Mode != "domestic")
+            {
+                catalog.Add(entry);
+                continue;
+            }
+            catalog.AddRange(DomesticProviderCatalog.All.Where(x => x.CaptureSupported)
+                .Select(x => ($"国产模型 · {x.Name}", DomesticCycleEntry(x.Id))));
+        }
+        return catalog;
+    }
+
+    List<string> ConfiguredCyclePages()
+    {
+        var canonical = CycleCatalog().ToDictionary(x => x.Mode, x => x.Mode,
+            StringComparer.OrdinalIgnoreCase);
+        return Settings.Get(CyclePagesKey)
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Where(valid.Contains)
+            .Select(mode => mode.Equals("domestic", StringComparison.OrdinalIgnoreCase)
+                ? DomesticCycleEntry(_domesticProvider) : mode)
+            .Where(canonical.ContainsKey)
+            .Select(mode => canonical[mode])
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
-        if (_cyclePageItems.Count != CycleModes.Length) return saved;
+    }
+
+    List<string> CyclePages()
+    {
+        var catalog = CycleCatalog();
+        var saved = ConfiguredCyclePages();
+        if (_cyclePageItems.Count != catalog.Count) return saved;
 
         var ordered = saved.Where(mode => _cyclePageItems[mode].Checked).ToList();
-        ordered.AddRange(CycleModes.Select(x => x.Mode)
+        ordered.AddRange(catalog.Select(x => x.Mode)
             .Where(mode => _cyclePageItems[mode].Checked && !ordered.Contains(mode)));
         return ordered;
     }
@@ -554,7 +635,7 @@ sealed class TrayAppContext : ApplicationContext
             Toast("循环展示", "请先在“循环页面”中至少选择两个页面。");
             return;
         }
-        var ordered = CycleOrderDialog.Show(pages, CycleModes);
+        var ordered = CycleOrderDialog.Show(pages, CycleCatalog());
         if (ordered == null) return;
         Settings.Set(CyclePagesKey, string.Join(",", ordered));
         _cycleIndex = -1;
@@ -620,7 +701,16 @@ sealed class TrayAppContext : ApplicationContext
         try
         {
             _cycleIndex = (_cycleIndex + 1) % pages.Count;
-            await DeviceClient.SetDisplayMode(pages[_cycleIndex]);
+            var page = pages[_cycleIndex];
+            if (TryDomesticCycleEntry(page, out var provider))
+            {
+                ActivateDomesticProvider(provider);
+                await DeviceClient.SetDisplayMode("domestic");
+            }
+            else
+            {
+                await DeviceClient.SetDisplayMode(page);
+            }
             await RefreshDeviceSection();
         }
         catch (Exception e)

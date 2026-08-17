@@ -27,7 +27,7 @@
 
 | | |
 |---|---|
-| <img src="docs/images/feature1.jpg" width="360" alt="AI 工作状态"> | **AI 工作状态与额度**<br>桌宠动起来 = AI 正在干活。Claude/Codex 的 5H/WK 行同时显示真实用量和重置倒计时；Codex 还会显示官方接口返回的剩余可用重置次数。国产模型页可在厂商子菜单中单选。阿里云百炼 Token Plan 显示总额度和固定重置时间，Coding Plan 有真实窗口时显示 5H/WK；月之暗面显示 Kimi Coding Plan 的会员权益、Weekly/5H 及各自重置时间。授权后每 2 分钟自动刷新，并缓存供应商页面返回的准确值。未知额度或窗口直接隐藏/显示 `--`，不做估算。 |
+| <img src="docs/images/feature1.jpg" width="360" alt="AI 工作状态"> | **AI 工作状态与额度**<br>桌宠动起来 = AI 正在干活。Claude/Codex 的 5H/WK 行同时显示真实用量和重置倒计时；Codex 还会显示官方接口返回的剩余可用重置次数。国产模型可手动单选，也可在循环展示中多选厂商。阿里云百炼 Token Plan 显示总额度和固定重置时间，Coding Plan 有真实窗口时显示 5H/WK；月之暗面显示 Kimi Coding Plan 的会员权益、Weekly/5H 及各自重置时间。授权后每 2 分钟自动刷新，并缓存供应商页面返回的准确值。未知额度或窗口直接隐藏/显示 `--`，不做估算。 |
 | <img src="docs/images/feature2.jpg" width="360" alt="系统监控"> | **系统实时监控**<br>任务管理器风格的上下行曲线，56 秒滚动窗口，量程自动调整，并同步显示 Windows CPU 与内存占用。 |
 | <img src="docs/images/music.jpg" width="360" alt="音乐播放"> | **音乐播放显示**<br>专辑封面、歌名、歌手、进度条实时同步；音乐响起自动切入，停止自动切回。 |
 | | **天气时钟与股票行情**<br>天气页采用大号时分秒、城市/天气/空气质量、温度和湿度布局；Windows 可配置和风天气实况、手动区县或 Windows 自动定位，并在请求失败时回退 Open-Meteo。股票页最多配置 20 只 A股/港股/美股，每屏 4 只、每 5 秒自动翻页，按国内习惯涨红跌绿。两页均保留最近成功值并支持 USB 直推。 |
@@ -67,10 +67,10 @@ Windows 可在「桥接服务」启用登录后自动启动。电脑关机、重
   <img src="docs/images/working.jpg" width="640" alt="工作演示">
 </p>
 
-日常使用都在托盘图标上：**左键**打开设备画面的实时镜像（底部有屏幕亮度滑条），**右键**按「模型额度、设备连接、显示模式、循环展示、内容设置、桌宠与外观、桥接服务」分类。循环展示首次运行默认开启，以 15 秒间隔轮播 Codex、Claude、天气、股票；也可自选页面、用“调整展示顺序”上移/下移排序，并选择 10/15/30/60 秒间隔。手动切换页面会自动停止循环。
+日常使用都在托盘图标上：**左键**打开设备画面的实时镜像（底部有屏幕亮度滑条），**右键**按「模型额度、设备连接、显示模式、循环展示、内容设置、桌宠与外观、桥接服务」分类。循环展示首次运行默认开启，以 15 秒间隔轮播 Codex、Claude、天气、股票；也可自选页面，并在「循环页面 → 国产模型」中多选已接通厂商。每个厂商都是独立循环项，可用“调整展示顺序”统一排序，并选择 10/15/30/60 秒间隔。手动切换页面会自动停止循环。
 屏保位于「显示模式 → 屏保设置」，可关闭、选择空闲时间或立即预览。
 显示模式中的「Claude + Codex 额度」会把 Claude 5h/Weekly 与 Codex 当前有效额度放在同一页，并显示重置倒计时。
-「显示模式 → 国产模型」列出国内主流厂商并且只能单选一个；当前已完整接通阿里云百炼、月之暗面和 MiniMax。MiniMax 优先通过官方 Token Plan API 读取，需要在授权页保存 Subscription Key / API Key，或从 `MINIMAX_SUBSCRIPTION_KEY`、`MINIMAX_TOKEN_PLAN_KEY`、`MINIMAX_API_KEY` 环境变量读取；其他厂商会明确标为「待接」。
+「显示模式 → 国产模型」用于手动单选一个厂商；「循环展示 → 循环页面 → 国产模型」可多选已接通厂商并分别轮播。当前已完整接通阿里云百炼、月之暗面、MiniMax 和 DeepSeek。DeepSeek 从已登录开放平台读取真实可用余额、币种和累计已使用费用，不把余额伪装成百分比。MiniMax 优先通过官方 Token Plan API 读取，需要在授权页保存 Subscription Key / API Key，或从 `MINIMAX_SUBSCRIPTION_KEY`、`MINIMAX_TOKEN_PLAN_KEY`、`MINIMAX_API_KEY` 环境变量读取；其他厂商会明确标为「待接」。
 
 ## 常见问题
 
@@ -80,7 +80,7 @@ Windows 可在「桥接服务」启用登录后自动启动。电脑关机、重
   程序会自动通过 COM 串口直连；状态、网速、音乐（含封面和中文）、天气、股票、显示控制、桌宠上传和
   镜像动画都不再依赖局域网互访。USB 断开后自动回退原有 WiFi HTTP 通道。
 - **额度一直显示 `-` / `--`**：代表供应商没有返回可验证的额度数据；不是连接故障。
-  千问 Token Plan 或 Kimi Coding Plan 需要在 Windows 托盘的「模型额度 → 国产模型额度授权」登录一次；MiniMax 需要在同一授权页保存 Subscription Key / API Key，或让桥接进程可读到 `MINIMAX_SUBSCRIPTION_KEY`、`MINIMAX_TOKEN_PLAN_KEY`、`MINIMAX_API_KEY` 之一。授权页会直接打开当前单选厂商。网页登录状态保存在独立 WebView2 profile 中并持久化 30 天，成功读取时自动续期；MiniMax Key 保存在 Windows 凭据管理器，不写入配置或缓存。国产模型的模型名和今日 token 来自本机 Claude Code 会话日志，只覆盖写入这些日志的调用，并不等于厂商账号下所有应用的总消耗。Claude 页只统计真正的 `claude-*` 模型，不统计通过 Claude Code 客户端调用的国产模型。
+  千问 Token Plan、Kimi Coding Plan 或 DeepSeek 余额需要在 Windows 托盘的「模型额度 → 国产模型额度授权」登录一次；MiniMax 需要在同一授权页保存 Subscription Key / API Key，或让桥接进程可读到 `MINIMAX_SUBSCRIPTION_KEY`、`MINIMAX_TOKEN_PLAN_KEY`、`MINIMAX_API_KEY` 之一。授权页会直接打开当前单选厂商。网页登录状态保存在独立 WebView2 profile 中并持久化 30 天，成功读取时自动续期；MiniMax Key 保存在 Windows 凭据管理器，不写入配置或缓存。国产模型的模型名和今日 token 来自本机 Claude Code 会话日志，只覆盖写入这些日志的调用，并不等于厂商账号下所有应用的总消耗。Claude 页只统计真正的 `claude-*` 模型，不统计通过 Claude Code 客户端调用的国产模型。
 - **想换桌宠**：右键托盘图标 → 「更换桌宠动画…」，挑一个点上传就行。
 
 ## 开发

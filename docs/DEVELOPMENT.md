@@ -179,7 +179,7 @@ pio device monitor -b 460800
 
 ## 3. 屏幕布局
 
-主视图不显示时钟：Claude/Codex 使用桌宠视图，国产模型显示当前在厂商子菜单中单选的供应商。
+主视图不显示时钟：Claude/Codex 使用桌宠视图，国产模型显示当前活动供应商。手动显示模式一次选择一个供应商；循环展示可把多个供应商作为独立页面依次激活。
 桌宠视图一次只显示 Claude 或 Codex 其中一个，规则：
 
 - **只有一方在工作** → 固定显示正在工作的那个
@@ -363,12 +363,14 @@ Windows 会把股票名称和天气三块中文位图合并成 RLE 页面缓存�
   使用持久化 WebView2 登录态后台刷新；同一厂商最少间隔 60 秒，供应商返回 429 时退避 5 分钟。结果缓存到
   `%APPDATA%\AIClockBridge\domestic-quota-cache.json`。
 
-阿里云、Kimi 和 MiniMax 登录使用 `%APPDATA%\AIClockBridge\quota-auth-profile` 的独立 WebView2 profile。
+阿里云、Kimi、MiniMax 和 DeepSeek 登录使用 `%APPDATA%\AIClockBridge\quota-auth-profile` 的独立 WebView2 profile。DeepSeek 捕获开放平台 JSON 响应中的钱包 `balance`、`currency` 和账户汇总 `total_costs[].amount`，缓存并显示真实可用余额与累计已使用费用；官方 `/user/balance` 需要独立 Bearer API Key，网页登录态不能直接替代。
 登录成功后把会话 Cookie 持久化 30 天，每次成功读取额度自动续期；Cookie 值不写入额度
 JSON 缓存或日志。供应商主动撤销会话时仍需重新登录。
 
-「显示模式 → 国产模型」使用同一份 `DomesticProviderCatalog` 生成厂商子菜单，严格单选；
-当前选项写入 `%APPDATA%\AIClockBridge\settings.json` 的 `domestic_provider`。目录列出国内
+「显示模式 → 国产模型」使用同一份 `DomesticProviderCatalog` 生成厂商子菜单并保持手动单选；
+「循环展示 → 循环页面 → 国产模型」只列出 `CaptureSupported` 厂商并允许多选，持久化为
+`display_cycle_pages` 中的 `domestic:<provider>` 独立循环项。旧 `domestic` 项启动时迁移为当前厂商，
+所有页面继续复用唯一的循环定时器。当前活动厂商写入 `%APPDATA%\AIClockBridge\settings.json` 的 `domestic_provider`。目录列出国内
 主流厂商，未实现准确额度解析的条目显示「待接」，选择后仍进入统一国产模型页面并显示未知额度；已支持厂商没有可验证额度时也保持未知，不回退显示其他厂商缓存。
 
 ## 10. Windows 自动屏保

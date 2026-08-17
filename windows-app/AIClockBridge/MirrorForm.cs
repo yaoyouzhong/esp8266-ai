@@ -372,21 +372,26 @@ sealed class MirrorControl : Control
     void DrawDomesticScene(Graphics g)
     {
         var p = Domestic.Active.Model.Length > 0 || Domestic.Active.PlanPct.HasValue
-            || Domestic.Active.TokensToday > 0
+            || Domestic.Active.Balance.HasValue || Domestic.Active.TokensToday > 0
             ? Domestic.Active
             : Domestic.ActiveProvider switch
             {
                 "xiaomi" => Domestic.Xiaomi,
                 "kimi" => Domestic.Kimi,
+                "minimax" => Domestic.MiniMax,
+                "deepseek" => Domestic.DeepSeek,
                 _ => Domestic.Qwen,
             };
         var provider = string.IsNullOrEmpty(Domestic.ActiveProvider)
             ? "QWEN" : Domestic.ActiveProvider.ToUpperInvariant();
         var isKimi = provider == "KIMI";
+        var isBalance = provider == "DEEPSEEK" && p.Balance.HasValue;
         var isWindowed = isKimi || p.FiveHourPct.HasValue || p.WeeklyPct.HasValue;
         var displayPct = isWindowed ? p.WeeklyPct ?? p.PlanPct : p.PlanPct;
-        var plan = displayPct.HasValue ? Math.Clamp((int)displayPct.Value, 0, 100) : 0;
-        var planNumber = displayPct.HasValue
+        var plan = isBalance ? 0 : displayPct.HasValue ? Math.Clamp((int)displayPct.Value, 0, 100) : 0;
+        var planNumber = isBalance
+            ? p.Balance.Value.ToString("0.00", CultureInfo.InvariantCulture)
+            : displayPct.HasValue
             ? (!isWindowed && p.PlanPctText.Length > 0 ? p.PlanPctText
                 : ((int)Math.Clamp(displayPct.Value, 0, 100)).ToString(CultureInfo.InvariantCulture))
             : "--";
@@ -451,20 +456,22 @@ sealed class MirrorControl : Control
         g.FillRectangle(mutedBrush, 20, 53, 200, 1);
         g.FillRectangle(greenBrush, 20, 53, 42, 1);
 
-        g.DrawString(isWindowed ? "WEEKLY" : "PLAN", smallFont, mutedBrush,
+        g.DrawString(isBalance ? "AVAILABLE BALANCE" : isWindowed ? "WEEKLY" : "PLAN", smallFont, mutedBrush,
                      new RectangleF(0, 69, 240, 16), centered);
         var numberSize = g.MeasureString(planNumber, percentFont);
-        var suffixWidth = p.PlanPct.HasValue ? g.MeasureString("%", suffixFont).Width + 4 : 0;
+        var suffix = isBalance ? p.Currency : "%";
+        var suffixWidth = isBalance || p.PlanPct.HasValue
+            ? g.MeasureString(suffix, suffixFont).Width + 4 : 0;
         var numberLeft = 120 - (numberSize.Width + suffixWidth) / 2;
         var numberTop = 90 + (54 - numberSize.Height) / 2;
         g.DrawString(planNumber, percentFont, numberBrush, numberLeft, numberTop);
-        if (p.PlanPct.HasValue)
-            g.DrawString("%", suffixFont, greenBrush, numberLeft + numberSize.Width + 4,
+        if (isBalance || p.PlanPct.HasValue)
+            g.DrawString(suffix, suffixFont, greenBrush, numberLeft + numberSize.Width + 4,
                 numberTop + numberSize.Height - suffixFont.Height - 1);
 
-        g.DrawString(isWindowed ? "RESET" : "REMAINING", smallFont, mutedBrush, 37, 153);
+        g.DrawString(isBalance ? "SOURCE" : isWindowed ? "RESET" : "REMAINING", smallFont, mutedBrush, 37, 153);
         using (var right = new StringFormat(centered) { Alignment = StringAlignment.Far })
-            g.DrawString(isWindowed ? ResetText(p.WeeklyResetMin) : remaining,
+            g.DrawString(isBalance ? "DEEPSEEK" : isWindowed ? ResetText(p.WeeklyResetMin) : remaining,
                 labelFont, greenBrush, new RectangleF(95, 149, 108, 20), right);
 
         using (var panel = RoundedRect(new RectangleF(20, 177, 200, 38), 8))
@@ -475,7 +482,31 @@ sealed class MirrorControl : Control
             ? (p.FiveHourPct.HasValue
                 ? $"{(int)Math.Clamp(p.FiveHourPct.Value, 0, 100)}%" : "--")
             : PlanResetText(p.PlanResetAt, p.PlanResetMin);
-        if (isWindowed)
+        if (isBalance)
+        {
+            g.DrawString("USED", labelFont, greenBrush,
+                new RectangleF(20, 177, 66, 38), centered);
+            if (p.UsedCost.HasValue)
+            {
+                var amount = p.UsedCost.Value.ToString("0.00", CultureInfo.InvariantCulture);
+                var amountWidth = g.MeasureString(amount, resetValueFont).Width;
+                var currencyWidth = string.IsNullOrEmpty(p.Currency)
+                    ? 0 : g.MeasureString(p.Currency, resetValueFont).Width;
+                var gap = currencyWidth > 0 ? 5 : 0;
+                var left = 153.5f - (amountWidth + gap + currencyWidth) / 2;
+                g.DrawString(amount, resetValueFont, numberBrush,
+                    new RectangleF(left, 177, amountWidth, 38), centered);
+                if (currencyWidth > 0)
+                    g.DrawString(p.Currency, resetValueFont, mutedBrush,
+                        new RectangleF(left + amountWidth + gap, 177, currencyWidth, 38), centered);
+            }
+            else
+            {
+                g.DrawString("--", resetValueFont, numberBrush,
+                    new RectangleF(87, 177, 133, 38), centered);
+            }
+        }
+        else if (isWindowed)
         {
             g.DrawString("5H", labelFont, greenBrush,
                 new RectangleF(20, 177, 66, 38), centered);
