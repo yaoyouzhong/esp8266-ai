@@ -572,7 +572,7 @@ sealed class StatusService
                 snap.Domestic.DeepSeek.Currency = du.DeepSeekCurrency;
                 if (du.DeepSeekBalance.HasValue)
                 {
-                    snap.Domestic.DeepSeek.Model = "API BALANCE";
+                    snap.Domestic.DeepSeek.Model = "API PAYG";
                     snap.Domestic.DeepSeek.MembershipBadge = true;
                 }
                 if (!string.IsNullOrWhiteSpace(du.QwenMembership))

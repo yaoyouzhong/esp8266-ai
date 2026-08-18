@@ -360,8 +360,8 @@ sealed class TrayAppContext : ApplicationContext
     void LoadCycleSettings()
     {
         var configured = Settings.Get(CycleEnabledKey);
-        _cycleEnabled = configured.Length == 0 || configured == "1";
-        if (configured.Length == 0)
+        _cycleEnabled = true;
+        if (configured != "1")
         {
             Settings.Set(CycleEnabledKey, "1");
             if (Settings.Get(CyclePagesKey).Length == 0)

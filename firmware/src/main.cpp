@@ -820,8 +820,8 @@ void drawDualPlanBadge(const String &plan, int top) {
 }
 
 void drawDualResetCreditBadge(int top) {
-  if (codexStatus.resetCreditsAvailable < 0) return;
-  uint16_t color = codexStatus.resetCreditsAvailable > 0 ? TFT_GREEN : 0x9492;
+  if (codexStatus.resetCreditsAvailable <= 0) return;
+  uint16_t color = TFT_MAGENTA;
   tft.fillRoundRect(82, top, 24, 17, 4, TFT_BLACK);
   tft.drawRoundRect(82, top, 24, 17, 4, color);
   tft.setTextDatum(MC_DATUM);
@@ -923,7 +923,7 @@ void drawPlanBadge(bool force) {
 }
 
 void drawResetCreditBadge(bool force) {
-  String value = currentApp == APP_CODEX && codexStatus.resetCreditsAvailable >= 0
+  String value = currentApp == APP_CODEX && codexStatus.resetCreditsAvailable > 0
       ? "RESET " + String(codexStatus.resetCreditsAvailable) : "";
   String expiry;
   if (codexStatus.resetCreditExpiresAt > 0) {
@@ -937,7 +937,7 @@ void drawResetCreditBadge(bool force) {
   lastResetCreditBadge = key;
   tft.fillRect(173, 26, 51, 28, TFT_BLACK);
   if (value.length() == 0) return;
-  uint16_t color = codexStatus.resetCreditsAvailable > 0 ? TFT_GREEN : 0x9492;
+  uint16_t color = TFT_MAGENTA;
   tft.fillRoundRect(174, 28, 48, 24, 5, TFT_BLACK);
   tft.drawRoundRect(174, 28, 48, 24, 5, color);
   tft.setTextDatum(MC_DATUM);
@@ -1348,7 +1348,7 @@ void drawDomesticScreen(bool force = false) {
   String planNumber = isBalance ? String(p.balance, 2) : displayPct >= 0
       ? (!isWindowed && p.planPctText.length() ? p.planPctText : String((int)displayPct)) : "--";
   String plan = isBalance ? planNumber + p.currency : displayPct >= 0 ? planNumber + "%" : "--";
-  String remaining = isBalance ? "DEEPSEEK" : isWindowed ? quotaResetText(p.weeklyResetMin)
+  String remaining = isBalance ? "" : isWindowed ? quotaResetText(p.weeklyResetMin)
       : p.planPct >= 0
           ? (p.remainingPctText.length() ? p.remainingPctText
               : String(floorf(max(0.0f, 100.0f - p.planPct) * 100.0f) / 100.0f, 2)) + "% LEFT"
@@ -1363,7 +1363,6 @@ void drawDomesticScreen(bool force = false) {
     domesticDrawCache.initialized = false;
     tft.fillCircle(25, 30, 4, TFT_GREEN);
     tft.fillRect(20, 53, 200, 1, mutedColor);
-    tft.fillRect(20, 53, 42, 1, TFT_GREEN);
     tft.fillRoundRect(20, 177, 200, 38, 8, panelColor);
     tft.drawRoundRect(20, 177, 200, 38, 8, 0x29A5);
     tft.setTextDatum(TL_DATUM);
@@ -1374,11 +1373,13 @@ void drawDomesticScreen(bool force = false) {
     tft.fillRect(34, 20, 72, 22, TFT_BLACK);
     tft.setTextDatum(TL_DATUM);
     drawBoldString(provider, 36, 24, 2, TFT_GREEN);
-    const int contentLeft = RING_MARGIN + RING_THICKNESS;
-    tft.fillRect(contentLeft, 69, SCREEN_W - contentLeft * 2, 16, TFT_BLACK);
-    tft.setTextDatum(TC_DATUM);
-    tft.setTextColor(mutedColor, TFT_BLACK);
-    tft.drawString(isBalance ? "AVAILABLE BALANCE" : isWindowed ? "WEEKLY" : "PLAN", SCREEN_CX, 73, 1);
+    if (!isBalance) {
+      const int contentLeft = RING_MARGIN + RING_THICKNESS;
+      tft.fillRect(contentLeft, 69, SCREEN_W - contentLeft * 2, 16, TFT_BLACK);
+      tft.setTextDatum(TC_DATUM);
+      tft.setTextColor(mutedColor, TFT_BLACK);
+      tft.drawString(isWindowed ? "WEEKLY" : "PLAN", SCREEN_CX, 73, 1);
+    }
     tft.fillRect(28, 181, 76, 31, panelColor);
     if (isBalance) {
       tft.setTextDatum(MC_DATUM);
@@ -1410,30 +1411,86 @@ void drawDomesticScreen(bool force = false) {
     }
   }
   if (force || !domesticDrawCache.initialized || plan != domesticDrawCache.plan) {
-    tft.fillRect(28, 90, 184, 54, TFT_BLACK);
-    int numberFont = planNumber.length() <= 3 ? 7 : planNumber.length() <= 6 ? 4 : 2;
-    int percentFont = numberFont == 7 ? 4 : 2;
-    int numberY = numberFont == 7 ? 90 : numberFont == 4 ? 101 : 108;
-    int percentY = numberFont == 7 ? 105 : numberFont == 4 ? 108 : 108;
-    int numberWidth = tft.textWidth(planNumber, numberFont);
     String suffix = isBalance ? p.currency : "%";
-    int percentWidth = isBalance || displayPct >= 0 ? tft.textWidth(suffix, percentFont) : 0;
-    int left = SCREEN_CX - (numberWidth + (percentWidth ? 4 + percentWidth : 0)) / 2;
-    tft.setTextDatum(TL_DATUM);
-    drawBoldString(planNumber, left, numberY, numberFont, numberColor);
-    if (percentWidth) {
-      tft.setTextColor(TFT_GREEN, TFT_BLACK);
-      tft.drawString(suffix, left + numberWidth + 4, percentY, percentFont);
+    if (isBalance) {
+      const String caption = "AVAILABLE BALANCE";
+      const int areaX = 20, areaY = 62, areaW = 200, areaH = 106;
+      const int maxContentW = areaW - 16, maxContentH = areaH - 16;
+      int captionFont = 2, valueFont = 6, currencyFont = 4;
+      int lineGap = 8, valueGap = suffix.length() ? 6 : 0;
+      int captionWidth = tft.textWidth(caption, captionFont);
+      int numberWidth = tft.textWidth(planNumber, valueFont) + 1;
+      int suffixWidth = suffix.length() ? tft.textWidth(suffix, currencyFont) : 0;
+      int valueWidth = numberWidth + valueGap + suffixWidth;
+      int componentHeight = tft.fontHeight(captionFont) + lineGap + tft.fontHeight(valueFont);
+
+      // Keep the balance dominant and CNY secondary. Built-in fonts have
+      // discrete sizes, so choose the largest complete layout that fits.
+      if (max(captionWidth, valueWidth) > maxContentW || componentHeight > maxContentH) {
+        valueFont = 4;
+        captionWidth = tft.textWidth(caption, captionFont);
+        numberWidth = tft.textWidth(planNumber, valueFont) + 1;
+        suffixWidth = suffix.length() ? tft.textWidth(suffix, currencyFont) : 0;
+        valueWidth = numberWidth + valueGap + suffixWidth;
+        componentHeight = tft.fontHeight(captionFont) + lineGap + tft.fontHeight(valueFont);
+      }
+      if (max(captionWidth, valueWidth) > maxContentW || componentHeight > maxContentH) {
+        captionFont = 1;
+        valueFont = 2;
+        currencyFont = 1;
+        lineGap = 6;
+        valueGap = suffix.length() ? 4 : 0;
+        captionWidth = tft.textWidth(caption, captionFont);
+        numberWidth = tft.textWidth(planNumber, valueFont) + 1;
+        suffixWidth = suffix.length() ? tft.textWidth(suffix, currencyFont) : 0;
+        valueWidth = numberWidth + valueGap + suffixWidth;
+        componentHeight = tft.fontHeight(captionFont) + lineGap + tft.fontHeight(valueFont);
+      }
+
+      const int centerX = areaX + areaW / 2;
+      int top = areaY + (areaH - componentHeight) / 2;
+      int valueTop = top + tft.fontHeight(captionFont) + lineGap;
+      int valueLeft = centerX - valueWidth / 2;
+      tft.fillRect(areaX, areaY, areaW, areaH, TFT_BLACK);
+      tft.setTextDatum(TL_DATUM);
+      tft.setTextColor(mutedColor, TFT_BLACK);
+      tft.drawString(caption, centerX - captionWidth / 2, top, captionFont);
+      drawBoldString(planNumber, valueLeft, valueTop, valueFont, numberColor);
+      if (suffixWidth) {
+        tft.setTextColor(TFT_GREEN, TFT_BLACK);
+        int baselineCorrection = valueFont == 6 && currencyFont == 4 ? 8
+            : valueFont == currencyFont ? 0 : 2;
+        int currencyTop = valueTop + tft.fontHeight(valueFont)
+            - tft.fontHeight(currencyFont) - baselineCorrection;
+        tft.drawString(suffix, valueLeft + numberWidth + valueGap, currencyTop, currencyFont);
+      }
+    } else {
+      tft.fillRect(28, 90, 184, 54, TFT_BLACK);
+      int numberFont = planNumber.length() <= 3 ? 7 : planNumber.length() <= 6 ? 4 : 2;
+      int percentFont = numberFont == 7 ? 4 : 2;
+      int numberY = numberFont == 7 ? 90 : numberFont == 6 ? 86 : numberFont == 4 ? 101 : 108;
+      int percentY = numberFont == 7 ? 105 : numberFont == 6 ? 114 : numberFont == 4 ? 108 : 108;
+      int numberWidth = tft.textWidth(planNumber, numberFont);
+      int percentWidth = displayPct >= 0 ? tft.textWidth(suffix, percentFont) : 0;
+      int left = SCREEN_CX - (numberWidth + (percentWidth ? 4 + percentWidth : 0)) / 2;
+      tft.setTextDatum(TL_DATUM);
+      drawBoldString(planNumber, left, numberY, numberFont, numberColor);
+      if (percentWidth) {
+        tft.setTextColor(TFT_GREEN, TFT_BLACK);
+        tft.drawString(suffix, left + numberWidth + 4, percentY, percentFont);
+      }
     }
   }
   if (force || !domesticDrawCache.initialized || remaining != domesticDrawCache.remaining) {
     tft.fillRect(30, 151, 180, 16, TFT_BLACK);
-    tft.setTextDatum(TL_DATUM);
-    tft.setTextColor(mutedColor, TFT_BLACK);
-    tft.drawString(isBalance ? "SOURCE" : isWindowed ? "RESET" : "REMAINING", 37, 153, 1);
-    tft.setTextDatum(TR_DATUM);
-    tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.drawString(remaining, 203, 151, 2);
+    if (!isBalance) {
+      tft.setTextDatum(TL_DATUM);
+      tft.setTextColor(mutedColor, TFT_BLACK);
+      tft.drawString(isWindowed ? "RESET" : "REMAINING", 37, 153, 1);
+      tft.setTextDatum(TR_DATUM);
+      tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      tft.drawString(remaining, 203, 151, 2);
+    }
   }
   if (force || !domesticDrawCache.initialized || tokens != domesticDrawCache.tokens
       || reset != domesticDrawCache.reset || isWindowed != domesticDrawCache.windowed
@@ -1450,7 +1507,7 @@ void drawDomesticScreen(bool force = false) {
         tft.setTextDatum(ML_DATUM);
         drawBoldString(amount, left, 196, 2, numberColor);
         if (currencyWidth) {
-          drawBoldString(p.currency, left + amountWidth + gap, 196, 2, mutedColor);
+          drawBoldString(p.currency, left + amountWidth + gap, 196, 2, TFT_GREEN);
         }
       } else {
         drawBoldString("--", 153, 196, 2, numberColor);

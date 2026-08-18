@@ -330,8 +330,8 @@ sealed class MirrorControl : Control
 
     void DrawResetCreditBadge(Graphics g)
     {
-        if (ShowingClaude || !ResetCreditsAvailable.HasValue) return;
-        var color = ResetCreditsAvailable.Value > 0 ? Green : Color.FromArgb(145, 145, 145);
+        if (ShowingClaude || !ResetCreditsAvailable.HasValue || ResetCreditsAvailable.Value <= 0) return;
+        var color = Color.FromArgb(255, 55, 210);
         using var countFont = new Font("Consolas", 7, FontStyle.Bold, GraphicsUnit.Pixel);
         using var dateFont = new Font("Consolas", 7, FontStyle.Regular, GraphicsUnit.Pixel);
         var rect = new RectangleF(174, 28, 48, 24);
@@ -454,25 +454,34 @@ sealed class MirrorControl : Control
                          new RectangleF(106, 20, 112, 22), right);
         }
         g.FillRectangle(mutedBrush, 20, 53, 200, 1);
-        g.FillRectangle(greenBrush, 20, 53, 42, 1);
 
-        g.DrawString(isBalance ? "AVAILABLE BALANCE" : isWindowed ? "WEEKLY" : "PLAN", smallFont, mutedBrush,
-                     new RectangleF(0, 69, 240, 16), centered);
-        var numberSize = g.MeasureString(planNumber, percentFont);
-        var suffix = isBalance ? p.Currency : "%";
-        var suffixWidth = isBalance || p.PlanPct.HasValue
-            ? g.MeasureString(suffix, suffixFont).Width + 4 : 0;
-        var numberLeft = 120 - (numberSize.Width + suffixWidth) / 2;
-        var numberTop = 90 + (54 - numberSize.Height) / 2;
-        g.DrawString(planNumber, percentFont, numberBrush, numberLeft, numberTop);
-        if (isBalance || p.PlanPct.HasValue)
-            g.DrawString(suffix, suffixFont, greenBrush, numberLeft + numberSize.Width + 4,
-                numberTop + numberSize.Height - suffixFont.Height - 1);
+        if (isBalance)
+        {
+            DrawDeepSeekBalance(g, planNumber, p.Currency, mutedBrush, numberBrush, greenBrush);
+        }
+        else
+        {
+            g.DrawString(isWindowed ? "WEEKLY" : "PLAN", smallFont, mutedBrush,
+                         new RectangleF(0, 69, 240, 16), centered);
+            var numberSize = g.MeasureString(planNumber, percentFont);
+            var suffixWidth = p.PlanPct.HasValue ? g.MeasureString("%", suffixFont).Width + 4 : 0;
+            var numberLeft = 120 - (numberSize.Width + suffixWidth) / 2;
+            var numberTop = 90 + (54 - numberSize.Height) / 2;
+            g.DrawString(planNumber, percentFont, numberBrush, numberLeft, numberTop);
+            if (p.PlanPct.HasValue)
+                g.DrawString("%", suffixFont, greenBrush, numberLeft + numberSize.Width + 4,
+                    numberTop + numberSize.Height - suffixFont.Height - 1);
+        }
 
-        g.DrawString(isBalance ? "SOURCE" : isWindowed ? "RESET" : "REMAINING", smallFont, mutedBrush, 37, 153);
-        using (var right = new StringFormat(centered) { Alignment = StringAlignment.Far })
-            g.DrawString(isBalance ? "DEEPSEEK" : isWindowed ? ResetText(p.WeeklyResetMin) : remaining,
-                labelFont, greenBrush, new RectangleF(95, 149, 108, 20), right);
+        if (!isBalance)
+        {
+            using (var right = new StringFormat(centered) { Alignment = StringAlignment.Far })
+            {
+                g.DrawString(isWindowed ? "RESET" : "REMAINING", smallFont, mutedBrush, 37, 153);
+                g.DrawString(isWindowed ? ResetText(p.WeeklyResetMin) : remaining, labelFont, greenBrush,
+                    new RectangleF(95, 149, 108, 20), right);
+            }
+        }
 
         using (var panel = RoundedRect(new RectangleF(20, 177, 200, 38), 8))
             g.FillPath(panelBrush, panel);
@@ -497,7 +506,7 @@ sealed class MirrorControl : Control
                 g.DrawString(amount, resetValueFont, numberBrush,
                     new RectangleF(left, 177, amountWidth, 38), centered);
                 if (currencyWidth > 0)
-                    g.DrawString(p.Currency, resetValueFont, mutedBrush,
+                    g.DrawString(p.Currency, resetValueFont, greenBrush,
                         new RectangleF(left + amountWidth + gap, 177, currencyWidth, 38), centered);
             }
             else
@@ -521,6 +530,70 @@ sealed class MirrorControl : Control
                 new RectangleF(20, 177, 66, 38), centered);
             g.DrawString(panelValue, resetValueFont, cyanBrush,
                 new RectangleF(87, 177, 133, 38), centered);
+        }
+    }
+
+    static void DrawDeepSeekBalance(Graphics g, string balance, string currency,
+        Brush captionBrush, Brush numberBrush, Brush currencyBrush)
+    {
+        const string caption = "AVAILABLE BALANCE";
+        var area = new RectangleF(20, 62, 200, 106);
+        const float maxContentWidth = 184;
+        const float maxContentHeight = 90;
+        using var typographic = (StringFormat)StringFormat.GenericTypographic.Clone();
+        typographic.FormatFlags |= StringFormatFlags.NoWrap;
+
+        float valueSize = 48;
+        float captionSize = 16;
+        float currencySize = 26;
+        float lineGap = 8;
+        float valueGap = string.IsNullOrEmpty(currency) ? 0 : 6;
+        for (; valueSize >= 20; valueSize -= 1)
+        {
+            captionSize = Math.Clamp((float)Math.Round(valueSize * 0.34f), 10, 16);
+            currencySize = Math.Clamp((float)Math.Round(valueSize * 0.55f), 12, 26);
+            lineGap = Math.Clamp((float)Math.Round(valueSize * 0.17f), 5, 8);
+            valueGap = string.IsNullOrEmpty(currency) ? 0
+                : Math.Clamp((float)Math.Round(valueSize * 0.13f), 4, 6);
+            using var testCaptionFont = new Font("Consolas", captionSize, FontStyle.Regular, GraphicsUnit.Pixel);
+            using var testValueFont = new Font("Consolas", valueSize, FontStyle.Bold, GraphicsUnit.Pixel);
+            using var testCurrencyFont = new Font("Consolas", currencySize, FontStyle.Bold, GraphicsUnit.Pixel);
+            var captionWidth = g.MeasureString(caption, testCaptionFont, PointF.Empty, typographic).Width;
+            var numberWidth = g.MeasureString(balance, testValueFont, PointF.Empty, typographic).Width;
+            var currencyWidth = string.IsNullOrEmpty(currency) ? 0
+                : g.MeasureString(currency, testCurrencyFont, PointF.Empty, typographic).Width;
+            var totalHeight = testCaptionFont.GetHeight(g) + lineGap + testValueFont.GetHeight(g);
+            if (Math.Max(captionWidth, numberWidth + valueGap + currencyWidth) <= maxContentWidth
+                && totalHeight <= maxContentHeight)
+                break;
+        }
+
+        using var captionFont = new Font("Consolas", captionSize, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var valueFont = new Font("Consolas", valueSize, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var currencyFont = new Font("Consolas", currencySize, FontStyle.Bold, GraphicsUnit.Pixel);
+        var captionMeasured = g.MeasureString(caption, captionFont, PointF.Empty, typographic);
+        var numberMeasured = g.MeasureString(balance, valueFont, PointF.Empty, typographic);
+        var currencyMeasured = string.IsNullOrEmpty(currency) ? SizeF.Empty
+            : g.MeasureString(currency, currencyFont, PointF.Empty, typographic);
+        var valueWidth = numberMeasured.Width + valueGap + currencyMeasured.Width;
+        var componentHeight = captionFont.GetHeight(g) + lineGap + valueFont.GetHeight(g);
+        var centerX = area.Left + area.Width / 2;
+        var top = area.Top + (area.Height - componentHeight) / 2;
+        var valueTop = top + captionFont.GetHeight(g) + lineGap;
+        var valueLeft = centerX - valueWidth / 2;
+
+        g.DrawString(caption, captionFont, captionBrush,
+            new PointF(centerX - captionMeasured.Width / 2, top), typographic);
+        g.DrawString(balance, valueFont, numberBrush, new PointF(valueLeft, valueTop), typographic);
+        if (!string.IsNullOrEmpty(currency))
+        {
+            var valueAscent = valueFont.Size * valueFont.FontFamily.GetCellAscent(valueFont.Style)
+                / valueFont.FontFamily.GetEmHeight(valueFont.Style);
+            var currencyAscent = currencyFont.Size * currencyFont.FontFamily.GetCellAscent(currencyFont.Style)
+                / currencyFont.FontFamily.GetEmHeight(currencyFont.Style);
+            g.DrawString(currency, currencyFont, currencyBrush,
+                new PointF(valueLeft + numberMeasured.Width + valueGap,
+                    valueTop + valueAscent - currencyAscent), typographic);
         }
     }
 
@@ -556,9 +629,9 @@ sealed class MirrorControl : Control
             using var statusBrush = new SolidBrush(statusColor);
             g.FillEllipse(statusBrush, 18, top + 4, 7, 7);
             g.DrawString(name, appFont, name == "CLAUDE" ? Brushes.Orange : Brushes.Cyan, 31, top);
-            if (resetCredits.HasValue)
+            if (resetCredits.HasValue && resetCredits.Value > 0)
             {
-                var color = resetCredits.Value > 0 ? Green : Color.FromArgb(145, 145, 145);
+                var color = Color.FromArgb(255, 55, 210);
                 var badge = new RectangleF(82, top, 24, 16);
                 using var badgePath = RoundedRect(badge, 4);
                 using var badgeFill = new SolidBrush(Color.FromArgb(28, color));
