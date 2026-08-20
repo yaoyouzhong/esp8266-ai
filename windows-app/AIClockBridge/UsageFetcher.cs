@@ -228,9 +228,9 @@ sealed class UsageFetcher
             code = (int)resp.StatusCode;
             body = await resp.Content.ReadAsStringAsync();
         }
-        catch
+        catch (Exception ex)
         {
-            usage.Error = "Claude 用量请求失败";
+            usage.Error = $"Claude 用量请求失败：{ex.Message}";
             return usage;
         }
         if (code != 200)
@@ -332,9 +332,9 @@ sealed class UsageFetcher
                 code = (int)resp.StatusCode;
                 body = await resp.Content.ReadAsStringAsync();
             }
-            catch
+            catch (Exception ex)
             {
-                usage.Error = "Codex 用量请求失败";
+                usage.Error = $"Codex 用量请求失败：{ex.Message}";
                 return usage;
             }
             if (code != 401 && code != 403) break;

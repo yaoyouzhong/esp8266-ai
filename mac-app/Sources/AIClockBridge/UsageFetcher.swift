@@ -6,7 +6,8 @@ import Foundation
 //           ~/.claude/.credentials.json), then GET
 //           https://api.anthropic.com/api/oauth/usage  (5h + 7d windows)
 //   Codex:  token from ~/.codex/auth.json, then GET
-//           https://chatgpt.com/backend-api/wham/usage (5h + weekly windows)
+//           https://chatgpt.com/backend-api/wham/usage (weekly window; older
+//           accounts also had a 5h one - see the classification in fetchCodex)
 // Tokens never leave this machine except toward their own vendor's API.
 
 struct ProviderUsage {
@@ -93,10 +94,12 @@ final class UsageFetcher {
         req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         req.setValue("claude-code/2.1.0", forHTTPHeaderField: "User-Agent")
 
-        guard let (data, code) = Self.syncRequest(req) else {
-            usage.error = "Claude 用量请求失败"
+        let resp = Self.syncRequest(req)
+        guard let data = resp.data else {
+            usage.error = "Claude 用量请求失败：\(resp.error ?? "无响应")"
             return usage
         }
+        let code = resp.code
         guard code == 200 else {
             usage.rateLimited = code == 429
             usage.error = code == 401 ? "Claude 凭据过期，运行 claude 重新登录"
@@ -166,10 +169,12 @@ final class UsageFetcher {
             req.setValue(account, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
 
-        guard let (data, code) = Self.syncRequest(req) else {
-            usage.error = "Codex 用量请求失败"
+        let resp = Self.syncRequest(req)
+        guard let data = resp.data else {
+            usage.error = "Codex 用量请求失败：\(resp.error ?? "无响应")"
             return usage
         }
+        let code = resp.code
         guard (200...299).contains(code) else {
             usage.error = code == 401 || code == 403 ? "Codex 凭据过期，运行 codex 重新登录" : "Codex 用量接口 HTTP \(code)"
             return usage
@@ -179,17 +184,27 @@ final class UsageFetcher {
             usage.error = "Codex 用量响应解析失败"
             return usage
         }
+        // Codex dropped the 5h window (2026-07): primary_window now carries
+        // the weekly (604800s) limit and secondary_window is null. Classify
+        // each window by its advertised length instead of trusting the slot,
+        // so both the old (5h+weekly) and new (weekly-only) shapes map right.
         let now = Date().timeIntervalSince1970
-        if let w = rateLimit["primary_window"] as? [String: Any] {
-            usage.primaryPct = (w["used_percent"] as? NSNumber)?.doubleValue
+        for (key, fallbackSec) in [("primary_window", 5.0 * 3600), ("secondary_window", 7.0 * 86400)] {
+            guard let w = rateLimit[key] as? [String: Any] else { continue }
+            let pct = (w["used_percent"] as? NSNumber)?.doubleValue
+            var resetMin: Int?
             if let reset = (w["reset_at"] as? NSNumber)?.doubleValue {
-                usage.primaryResetMin = max(0, Int((reset - now) / 60))
+                resetMin = max(0, Int((reset - now) / 60))
             }
-        }
-        if let w = rateLimit["secondary_window"] as? [String: Any] {
-            usage.weeklyPct = (w["used_percent"] as? NSNumber)?.doubleValue
-            if let reset = (w["reset_at"] as? NSNumber)?.doubleValue {
-                usage.weeklyResetMin = max(0, Int((reset - now) / 60))
+            let windowSec = (w["limit_window_seconds"] as? NSNumber)?.doubleValue ?? fallbackSec
+            if windowSec >= 2 * 86400 {
+                if usage.weeklyPct == nil {
+                    usage.weeklyPct = pct
+                    usage.weeklyResetMin = resetMin
+                }
+            } else if usage.primaryPct == nil {
+                usage.primaryPct = pct
+                usage.primaryResetMin = resetMin
             }
         }
         usage.fetchedAt = Date()
@@ -240,12 +255,14 @@ final class UsageFetcher {
         return max(0, Int((d.timeIntervalSince1970 - now) / 60))
     }
 
-    private static func syncRequest(_ req: URLRequest) -> (Data, Int)? {
+    private static func syncRequest(_ req: URLRequest) -> (data: Data?, code: Int, error: String?) {
         let sem = DispatchSemaphore(value: 0)
-        var result: (Data, Int)?
-        URLSession.shared.dataTask(with: req) { data, resp, _ in
+        var result: (data: Data?, code: Int, error: String?) = (nil, 0, "无响应")
+        URLSession.shared.dataTask(with: req) { data, resp, err in
             if let data = data, let http = resp as? HTTPURLResponse {
-                result = (data, http.statusCode)
+                result = (data, http.statusCode, nil)
+            } else {
+                result = (nil, 0, err?.localizedDescription ?? "无响应")
             }
             sem.signal()
         }.resume()

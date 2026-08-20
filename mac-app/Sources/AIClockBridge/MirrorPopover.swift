@@ -82,6 +82,10 @@ final class MirrorView: NSView {
     // one column per 250ms sample, 224-column (56s) window, shared "nice"
     // full-scale, dim-green download area + yellow upload line.
     var netMode = false
+    var netCPU = -1 // -1 = hidden (CPU/MEM row disabled in the menu)
+    var netMem = -1
+    var stockMode = false
+    var stockRows: [StockMonitor.Row] = []
     var netHeaderDL = "0B"
     var netHeaderUL = "0B"
     private static let netCols = 224 // NET_CHART_W
@@ -101,13 +105,11 @@ final class MirrorView: NSView {
         needsDisplay = true
     }
 
-    /// Firmware's niceNetScale: shared whole-chart scale snapped to 1/2/5 steps.
-    private static func niceNetScale(_ maxV: Double) -> Double {
-        let steps: [Double] = [10_240, 20_480, 51_200, 102_400, 204_800, 512_000,
-                               1_048_576, 2_097_152, 5_242_880, 10_485_760, 20_971_520,
-                               52_428_800, 104_857_600, 209_715_200, 524_288_000]
-        return steps.first { maxV <= $0 } ?? steps[steps.count - 1]
+    /// Firmware's adaptiveNetScale: the window peak sits at ~87% of the chart.
+    private static func adaptiveNetScale(_ maxV: Double) -> Double {
+        max(maxV * 1.15, 10240)
     }
+
     var musicMode = false
     var musicTitle = ""
     var musicArtist = ""
@@ -141,6 +143,11 @@ final class MirrorView: NSView {
         }
         if musicMode {
             drawMusicScene(ctx)
+            ctx.restoreGState()
+            return
+        }
+        if stockMode {
+            drawStockScene()
             ctx.restoreGState()
             return
         }
@@ -287,7 +294,7 @@ final class MirrorView: NSView {
         ])
 
         let cx: CGFloat = 8, cy: CGFloat = 60, cw: CGFloat = 224, ch: CGFloat = 128
-        let scale = Self.niceNetScale(max(histRx.max() ?? 0, histTx.max() ?? 0))
+        let scale = Self.adaptiveNetScale(max(histRx.max() ?? 0, histTx.max() ?? 0))
 
         // quarter gridlines
         ctx.setStrokeColor(NSColor(white: 0.16, alpha: 1).cgColor)
@@ -320,6 +327,8 @@ final class MirrorView: NSView {
         ctx.setFillColor(NSColor(calibratedRed: 0, green: 0.33, blue: 0, alpha: 1).cgColor)
         ctx.fillPath()
         ctx.restoreGState()
+        // NOT the firmware's LINE_T: the popover is ~4x the panel's physical
+        // size, so a thin stroke here matches the device's thick one visually.
         ctx.setStrokeColor(green.cgColor)
         ctx.setLineWidth(3)
         ctx.setLineJoin(.round)
@@ -328,7 +337,7 @@ final class MirrorView: NSView {
         for p in dl.dropFirst() { ctx.addLine(to: p) }
         ctx.strokePath()
 
-        // upload: 2px yellow line
+        // upload: yellow line
         let ul = points(histTx)
         ctx.setStrokeColor(yellow.cgColor)
         ctx.setLineWidth(3)
@@ -346,9 +355,71 @@ final class MirrorView: NSView {
             ])
         let center = NSMutableParagraphStyle()
         center.alignment = .center
+        if netCPU >= 0 {
+            // fixed-x label + value columns, so a value width change (5% ->
+            // 30%) never shifts the rest of the row (matches the firmware)
+            let sysLabelFont = NSFont.monospacedSystemFont(ofSize: 9, weight: .medium)
+            let sysValueFont = NSFont.monospacedSystemFont(ofSize: 15, weight: .bold)
+            ("CPU" as NSString).draw(at: NSPoint(x: 28, y: 196), withAttributes: [
+                .font: sysLabelFont, .foregroundColor: grey,
+            ])
+            ("\(netCPU)%" as NSString).draw(at: NSPoint(x: 62, y: 190), withAttributes: [
+                .font: sysValueFont, .foregroundColor: NSColor.white,
+            ])
+            ("MEM" as NSString).draw(at: NSPoint(x: 130, y: 196), withAttributes: [
+                .font: sysLabelFont, .foregroundColor: grey,
+            ])
+            ("\(netMem)%" as NSString).draw(at: NSPoint(x: 164, y: 190), withAttributes: [
+                .font: sysValueFont, .foregroundColor: NSColor.white,
+            ])
+        }
         ("MAC NET  -  56s" as NSString).draw(
-            in: NSRect(x: 0, y: 206, width: 240, height: 12), withAttributes: [
+            in: NSRect(x: 0, y: 212, width: 240, height: 12), withAttributes: [
                 .font: labelFont, .foregroundColor: grey, .paragraphStyle: center,
+            ])
+    }
+
+    // Stock watchlist, same 54px rows as the firmware: grey code (the mirror
+    // can render the CJK name next to it), big white price, colored change.
+    private func drawStockScene() {
+        let grey = NSColor(white: 0.55, alpha: 1)
+        let codeFont = NSFont.monospacedSystemFont(ofSize: 10, weight: .medium)
+        let valueFont = NSFont.monospacedSystemFont(ofSize: 17, weight: .bold)
+        if stockRows.isEmpty {
+            let style = NSMutableParagraphStyle()
+            style.alignment = .center
+            ("未配置自选股\n右键菜单 → 设置自选股…" as NSString).draw(
+                in: NSRect(x: 0, y: 104, width: 240, height: 40), withAttributes: [
+                    .font: NSFont.systemFont(ofSize: 11), .foregroundColor: grey,
+                    .paragraphStyle: style,
+                ])
+            return
+        }
+        for (i, row) in stockRows.prefix(4).enumerated() {
+            let y0 = CGFloat(10 + i * 54)
+            let label = row.name.isEmpty ? row.code : "\(row.code)  \(row.name)"
+            (label as NSString).draw(at: NSPoint(x: 14, y: y0), withAttributes: [
+                .font: codeFont, .foregroundColor: grey,
+            ])
+            (row.price as NSString).draw(at: NSPoint(x: 14, y: y0 + 15), withAttributes: [
+                .font: valueFont, .foregroundColor: NSColor.white,
+            ])
+            let pctColor = row.up > 0 ? NSColor(calibratedRed: 1, green: 0.23, blue: 0.19, alpha: 1)
+                : (row.up < 0 ? NSColor(calibratedRed: 0, green: 0.85, blue: 0.2, alpha: 1)
+                              : NSColor.lightGray)
+            let style = NSMutableParagraphStyle()
+            style.alignment = .right
+            (row.pct as NSString).draw(
+                in: NSRect(x: 120, y: y0 + 15, width: 106, height: 22), withAttributes: [
+                    .font: valueFont, .foregroundColor: pctColor, .paragraphStyle: style,
+                ])
+        }
+        let center = NSMutableParagraphStyle()
+        center.alignment = .center
+        ("STOCKS" as NSString).draw(
+            in: NSRect(x: 0, y: 224, width: 240, height: 12), withAttributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 8, weight: .medium),
+                .foregroundColor: grey, .paragraphStyle: center,
             ])
     }
 
@@ -366,9 +437,10 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private let service: StatusService
     private let netMonitor: NetSpeedMonitor
     private let nowPlaying: NowPlayingMonitor
+    private let stockMonitor: StockMonitor
     private let popover = NSPopover()
     private let mirror = MirrorView()
-    private let modeControl = NSSegmentedControl(labels: ["自动", "Claude", "Codex", "网速", "音乐"],
+    private let modeControl = NSSegmentedControl(labels: ["自动", "Claude", "Codex", "网速", "音乐", "股票"],
                                                  trackingMode: .selectOne, target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "连接设备中…")
     private let brightnessSlider = NSSlider(value: 100, minValue: 0, maxValue: 100,
@@ -386,10 +458,12 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private var lastInfo: DeviceInfo?
     private var fetchingSlot: String?
 
-    init(service: StatusService, netMonitor: NetSpeedMonitor, nowPlaying: NowPlayingMonitor) {
+    init(service: StatusService, netMonitor: NetSpeedMonitor, nowPlaying: NowPlayingMonitor,
+         stockMonitor: StockMonitor) {
         self.service = service
         self.netMonitor = netMonitor
         self.nowPlaying = nowPlaying
+        self.stockMonitor = stockMonitor
         super.init()
         popover.behavior = .transient
         popover.delegate = self
@@ -506,6 +580,9 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
         let smoothed = netMonitor.currentSmoothed
         mirror.netHeaderDL = MirrorView.deviceSpeedText(smoothed.rx)
         mirror.netHeaderUL = MirrorView.deviceSpeedText(smoothed.tx)
+        let stats = SystemStatsMonitor.shared.snapshot() // internally 1s-cached
+        mirror.netCPU = stats.cpu
+        mirror.netMem = stats.mem
         mirror.pushNetSample(rx: cur.rx, tx: cur.tx)
     }
 
@@ -519,7 +596,8 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                 self.applyScene(info)
                 self.ensureSprite(info)
                 self.syncBrightness(info)
-                let modeIdx = ["auto": 0, "claude": 1, "codex": 2, "net": 3, "music": 4][info.mode] ?? 0
+                let modeIdx = ["auto": 0, "claude": 1, "codex": 2, "net": 3,
+                               "music": 4, "stock": 5][info.mode] ?? 0
                 self.modeControl.selectedSegment = modeIdx
                 let modeText = info.mode == "auto" ? "自动切换"
                     : info.mode == "net" ? "网速曲线"
@@ -550,6 +628,12 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
         let enteringNet = info.effective == "net" && !mirror.netMode
         mirror.netMode = info.effective == "net"
         mirror.musicMode = info.effective == "music"
+        mirror.stockMode = info.effective == "stock"
+        if mirror.stockMode {
+            mirror.stockRows = stockMonitor.snapshot
+            mirror.needsDisplay = true
+            return
+        }
         if mirror.netMode {
             if enteringNet { mirror.resetNetSweep() } // fresh sweep, like the device's chrome reset
             mirror.needsDisplay = true
@@ -577,9 +661,16 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
             mirror.line2 = "Weekly " + Self.pctText(snap.claude.sevenDayPct)
             mirror.needsInput = snap.claude.needsInput
         } else {
-            mirror.ringPct = snap.codex.primaryPct ?? 0
-            mirror.line1 = "5h " + Self.pctText(snap.codex.primaryPct)
-            mirror.line2 = "Weekly " + Self.pctText(snap.codex.weeklyPct)
+            // Codex may only have a weekly window now (5h limit dropped):
+            // ring + single line follow whatever windows actually exist.
+            mirror.ringPct = snap.codex.primaryPct ?? snap.codex.weeklyPct ?? 0
+            if snap.codex.primaryPct == nil, snap.codex.weeklyPct != nil {
+                mirror.line1 = "Weekly " + Self.pctText(snap.codex.weeklyPct)
+                mirror.line2 = ""
+            } else {
+                mirror.line1 = "5h " + Self.pctText(snap.codex.primaryPct)
+                mirror.line2 = "Weekly " + Self.pctText(snap.codex.weeklyPct)
+            }
             mirror.needsInput = snap.codex.needsInput
         }
         mirror.needsDisplay = true
@@ -650,7 +741,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     }
 
     @objc private func modeChanged() {
-        let mode = ["auto", "claude", "codex", "net", "music"][max(0, modeControl.selectedSegment)]
+        let mode = ["auto", "claude", "codex", "net", "music", "stock"][max(0, modeControl.selectedSegment)]
         DeviceClient.setDisplayMode(mode) { [weak self] _ in self?.tick() }
     }
 }
