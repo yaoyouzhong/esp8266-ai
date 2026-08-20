@@ -389,11 +389,13 @@ Windows 每秒通过 `GetLastInputInfo` 读取系统键鼠空闲时间，超时�
 等页面也会切到对应桌宠并闪烁红色边框。桥接只在 Codex Desktop/CLI 会话 JSONL 新增内容中
 读到明确的 `event_msg.payload.type = task_complete`（或集成方显式推送 `TaskComplete`）时触发完成提醒；
 Hook `Stop` 仅更新为空闲。完成时 Windows 播放一次
-系统提示音，设备四边完整绿框以独立 140 ms 节拍做 5 次渐变脉冲并播放桌宠动画，随后恢复真实额度进度环
+专属四音上行提示音，设备四边完整绿框以独立 140 ms 节拍做 5 次渐变脉冲并播放桌宠动画，随后恢复真实额度进度环
 和提醒前的固定页面。闪烁期间又有任务完成时，从新的完成序号重新计算 5 次；完成后出现的新事件会再次触发。
 JSONL 检测启动时以现有 EOF 为基线，之后为每个文件维护增量读取位置、保留未写完的末行，
 并按 `turn_id` 去重。这样即使完成后紧接着写入超过 128KB 的上下文也不会漏报，旧大文件恢复
-写入也不会重放历史完成事件。它不修改或占用 Codex Desktop 自己的 `notify` 配置。
+写入也不会重放历史完成事件。带有 `session_meta.payload.source.subagent` 的 guardian 等后台会话
+只推进读取游标，不触发完成提醒；用户可见的主任务仍在每轮结束时提醒。它不修改或占用
+Codex Desktop 自己的 `notify` 配置。
 
 ## 已知限制 / TODO
 

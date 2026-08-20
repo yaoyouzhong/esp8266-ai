@@ -287,6 +287,7 @@ sealed class StatusService
     {
         public long Position;
         public string Partial = "";
+        public bool? IsSubagent;
     }
 
     readonly Dictionary<string, CodexLogCursor> _codexLogCursors =
@@ -717,6 +718,34 @@ sealed class StatusService
         return "";
     }
 
+    static bool? IsCodexSubagentSession(string path)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
+                                          FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(fs, Encoding.UTF8);
+            for (var i = 0; i < 32; i++)
+            {
+                var line = reader.ReadLine();
+                if (line == null) return null;
+                if (!line.Contains("\"session_meta\"", StringComparison.Ordinal)) continue;
+                using var doc = JsonDocument.Parse(line);
+                var root = doc.RootElement;
+                if (StringVal(root, "type") != "session_meta"
+                    || !TryProp(root, "payload", out var payload)
+                    || !TryProp(payload, "source", out var source)) return false;
+                return source.ValueKind == JsonValueKind.Object
+                    && source.TryGetProperty("subagent", out _);
+            }
+        }
+        catch
+        {
+            // A newly created JSONL may not have a complete session_meta line yet.
+        }
+        return null;
+    }
+
     List<double> ReadNewCodexTaskCompletes(string path)
     {
         var completions = new List<double>();
@@ -729,16 +758,25 @@ sealed class StatusService
             }
             var observedLength = new FileInfo(path).Length;
             if (cursor.Position == observedLength) return completions;
-            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
-                                          FileShare.ReadWrite | FileShare.Delete);
-            // A same-path replacement/truncation is treated as a new baseline;
-            // replaying its historical contents would create false alerts.
-            if (cursor.Position > fs.Length)
+            if (cursor.Position > observedLength)
             {
-                cursor.Position = fs.Length;
+                // A same-path replacement/truncation is a new session baseline.
+                cursor.Position = observedLength;
+                cursor.Partial = "";
+                cursor.IsSubagent = null;
+                return completions;
+            }
+            cursor.IsSubagent ??= IsCodexSubagentSession(path);
+            if (cursor.IsSubagent == true)
+            {
+                // Guardian and other internal subagents finish independently of
+                // the user-visible turn. Consume their logs without alerting.
+                cursor.Position = observedLength;
                 cursor.Partial = "";
                 return completions;
             }
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
+                                          FileShare.ReadWrite | FileShare.Delete);
             fs.Seek(cursor.Position, SeekOrigin.Begin);
             using var reader = new StreamReader(fs, Encoding.UTF8);
             var appended = reader.ReadToEnd();

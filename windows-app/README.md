@@ -22,9 +22,10 @@ Windows 版功能：
   5 秒移动刷新一次，下方显示日期和中文星期。
 - **Codex 动作提醒**：`PermissionRequest` 会从任意固定页面切到 Codex，并以整圈红色边框闪烁；
   完成提醒只认 Codex Desktop/CLI 会话 JSONL 的明确 `task_complete`（或集成方显式发送
-  `TaskComplete`）；Hook 的 `Stop` 只表示本轮停止，不等同任务完成。完成时触发四边
-  播放一次 Windows 系统提示音，同时显示完整绿框的 5 次平滑脉冲和桌宠动画；多个完成事件按最新完成序号重新触发，随后恢复真实额度进度环和原固定页面，不要求修改 Codex Desktop 的
-  `notify` 配置。
+  `TaskComplete`）；Hook 的 `Stop` 只表示本轮停止，不等同任务完成。完成时播放一次
+  专属四音上行提示音，同时显示完整绿框的 5 次平滑脉冲和桌宠动画；多个完成事件按最新完成序号重新触发，随后恢复真实额度进度环和原固定页面，不要求修改 Codex Desktop 的
+  `notify` 配置。桥接会忽略 `session_meta.payload.source.subagent` 标记的 guardian 等后台
+  子任务，只在用户可见的主任务结束、等待下一次输入时提醒。
 - 本地 HTTP 服务 `0.0.0.0:8765`：`/status`、`/net`、`/music`、`/stock`、`/weather` 及其
   RGB565 中文位图端点、`POST /event`（Claude Code / Codex hooks 秒级状态推送）
 

@@ -93,7 +93,7 @@ static class Program
 
         var service = new StatusService();
         service.DomesticProviderOverride = ConfiguredDomesticProvider();
-        service.CodexCompletion = () => System.Media.SystemSounds.Asterisk.Play();
+        service.CodexCompletion = CompletionChime.Play;
         var codexWasForeground = ForegroundApp.IsCodex;
         using var completionAcknowledger = new System.Threading.Timer(_ =>
         {
