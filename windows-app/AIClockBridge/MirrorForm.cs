@@ -69,8 +69,6 @@ sealed class MirrorControl : Control
 
     static readonly Color Green = Color.FromArgb(0, 217, 51);
     static readonly Color Yellow = Color.FromArgb(255, 204, 0);
-    static readonly Color ResetCreditYellow = Color.FromArgb(255, 255, 0);
-    static readonly Color ResetCreditBorderYellow = Color.FromArgb(173, 170, 0);
     static readonly Color RingTrack = Color.FromArgb(42, 42, 42);
 
     public MirrorControl()
@@ -341,13 +339,13 @@ sealed class MirrorControl : Control
     void DrawResetCreditBadge(Graphics g)
     {
         if (ShowingClaude || !ResetCreditsAvailable.HasValue || ResetCreditsAvailable.Value <= 0) return;
-        var color = ResetCreditYellow;
+        var color = Green;
         using var countFont = new Font("Consolas", 8, FontStyle.Bold, GraphicsUnit.Pixel);
         using var dateFont = new Font("Consolas", 8, FontStyle.Bold, GraphicsUnit.Pixel);
         var rect = new RectangleF(161, 27, 64, 26);
         using var path = RoundedRect(rect, 5);
         using var fill = new SolidBrush(Color.FromArgb(18, color));
-        using var border = new Pen(ResetCreditBorderYellow, 1);
+        using var border = new Pen(color, 1);
         using var countText = new SolidBrush(Green);
         using var dateText = new SolidBrush(color);
         var expiry = ResetCreditDate(ResetCreditExpiresAt);
@@ -645,7 +643,7 @@ sealed class MirrorControl : Control
             g.DrawString(name, appFont, name == "CLAUDE" ? Brushes.Orange : Brushes.Cyan, 31, top);
             if (resetCredits.HasValue && resetCredits.Value > 0)
             {
-                var color = ResetCreditYellow;
+                var color = Green;
                 using var resetFont = new Font("Consolas", 9, FontStyle.Bold, GraphicsUnit.Pixel);
                 var badge = new RectangleF(81, top, 34, 17);
                 using var badgeText = new SolidBrush(color);

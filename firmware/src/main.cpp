@@ -822,7 +822,7 @@ void drawDualPlanBadge(const String &plan, int top) {
 
 void drawDualResetCreditBadge(int top) {
   if (codexStatus.resetCreditsAvailable <= 0) return;
-  uint16_t color = TFT_YELLOW;
+  uint16_t color = TFT_GREEN;
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(color, TFT_BLACK);
   tft.drawString("R*" + String(codexStatus.resetCreditsAvailable), 98, top + 8, 2);
@@ -937,7 +937,7 @@ void drawResetCreditBadge(bool force) {
   tft.fillRect(160, 26, 65, 28, TFT_BLACK);
   if (count.length() == 0) return;
   tft.fillRoundRect(161, 27, 64, 26, 5, TFT_BLACK);
-  tft.drawRoundRect(161, 27, 64, 26, 5, 0xAD40);
+  tft.drawRoundRect(161, 27, 64, 26, 5, TFT_GREEN);
   int gap = expiry.length() > 0 ? 4 : 0;
   int countWidth = tft.textWidth(count, 1);
   int expiryWidth = expiry.length() > 0 ? tft.textWidth(expiry, 1) : 0;
@@ -945,10 +945,8 @@ void drawResetCreditBadge(bool force) {
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
   tft.drawString(count, x, 40, 1);
-  if (expiry.length() > 0) {
-    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  if (expiry.length() > 0)
     tft.drawString(expiry, x + countWidth + gap, 40, 1);
-  }
 }
 
 // Claude's ring percentage is only a real 5h quota. Unknown never becomes an
