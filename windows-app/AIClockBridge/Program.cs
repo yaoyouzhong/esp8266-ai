@@ -79,6 +79,11 @@ static class Program
             Environment.Exit(TestQuotaWindow());
             return;
         }
+        if (args.Length >= 1 && args[0] == "--test-webview-recovery")
+        {
+            Environment.Exit(TestWebViewRecovery());
+            return;
+        }
 
         using var singleInstance = new Mutex(true, @"Local\AIClockBridge.SingleInstance", out var isFirstInstance);
         if (!isFirstInstance)
@@ -296,6 +301,66 @@ static class Program
         timer.Start();
         Application.Run();
         return passed ? 0 : 1;
+    }
+
+    static int TestWebViewRecovery()
+    {
+        ApplicationConfiguration.Initialize();
+        using var form = new DomesticQuotaAuthForm(new DomesticQuotaService(), hideOnUserClose: false);
+        Exception uiError = null;
+        System.Threading.ThreadExceptionEventHandler exceptionHandler = (_, e) => uiError = e.Exception;
+        Application.ThreadException += exceptionHandler;
+        var passed = false;
+        form.Shown += async (_, _) =>
+        {
+            try
+            {
+                var oldPid = await WaitForQuotaBrowser(form, 0, 0, TimeSpan.FromSeconds(20));
+                using var browser = System.Diagnostics.Process.GetProcessById((int)oldPid);
+                if (!browser.ProcessName.Equals("msedgewebview2", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException(
+                        $"refusing to terminate unexpected process {browser.ProcessName} ({oldPid})");
+                var recoveryCount = form.WebViewRecoveryCountForTest;
+                browser.Kill();
+                var newPid = await WaitForQuotaBrowser(
+                    form, oldPid, recoveryCount + 1, TimeSpan.FromSeconds(30));
+                form.ShowAuthorization("qwen");
+                await Task.Delay(1000);
+                passed = uiError == null && newPid != oldPid
+                    && form.BrowserProcessIdForTest == newPid;
+                Console.Error.WriteLine(passed
+                    ? $"[test-webview-recovery] browser process {oldPid} -> {newPid}; control recreated and reusable"
+                    : $"[test-webview-recovery] failed: old={oldPid}, new={newPid}, current={form.BrowserProcessIdForTest}, ui_error={uiError?.Message}");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[test-webview-recovery] failed: {ex}");
+            }
+            finally
+            {
+                form.Close();
+                Application.ExitThread();
+            }
+        };
+        form.RefreshInBackground("qwen");
+        Application.Run();
+        Application.ThreadException -= exceptionHandler;
+        return passed ? 0 : 1;
+    }
+
+    static async Task<uint> WaitForQuotaBrowser(DomesticQuotaAuthForm form, uint excludedPid,
+                                                int minimumRecoveryCount, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            var pid = form.BrowserProcessIdForTest;
+            if (pid != 0 && pid != excludedPid
+                && form.WebViewRecoveryCountForTest >= minimumRecoveryCount) return pid;
+            await Task.Delay(100);
+        }
+        throw new TimeoutException(
+            $"WebView2 browser did not become ready within {timeout.TotalSeconds:0} seconds");
     }
 
     static async Task<int> TestUsb()

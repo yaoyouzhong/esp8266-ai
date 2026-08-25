@@ -17,6 +17,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>AIClockBridge</AssemblyName>
     <RootNamespace>AIClockBridge</RootNamespace>
+    <ApplicationIcon>Assets\app-icon.ico</ApplicationIcon>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <NoWarn>$(NoWarn);MSB3277</NoWarn>
   </PropertyGroup>
@@ -31,6 +32,7 @@
     <EmbeddedResource Include="Assets\claude-logo.png" />
     <EmbeddedResource Include="Assets\codex-logo.png" />
     <EmbeddedResource Include="Assets\happy-mac.png" />
+    <EmbeddedResource Include="Assets\app-icon.png" />
   </ItemGroup>
 
 </Project>

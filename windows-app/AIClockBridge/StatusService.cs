@@ -534,15 +534,28 @@ sealed class StatusService
                 snap.Claude.SevenDayResetMin = cu.WeeklyResetMin;
                 var xu = Usage.Codex;
                 snap.Codex.Plan = xu.Plan ?? "";
-                if (xu.PrimaryPct.HasValue)
+                // A completed account-usage fetch is authoritative, including
+                // null windows. Otherwise a model-specific limit from a recent
+                // JSONL session can survive here and masquerade as account 5H.
+                if (xu.FetchedAt.HasValue)
                 {
                     snap.Codex.PrimaryPct = xu.PrimaryPct;
                     snap.Codex.PrimaryResetMin = xu.PrimaryResetMin;
-                }
-                if (xu.WeeklyPct.HasValue)
-                {
                     snap.Codex.WeeklyPct = xu.WeeklyPct;
                     snap.Codex.WeeklyResetMin = xu.WeeklyResetMin;
+                }
+                else
+                {
+                    if (xu.PrimaryPct.HasValue)
+                    {
+                        snap.Codex.PrimaryPct = xu.PrimaryPct;
+                        snap.Codex.PrimaryResetMin = xu.PrimaryResetMin;
+                    }
+                    if (xu.WeeklyPct.HasValue)
+                    {
+                        snap.Codex.WeeklyPct = xu.WeeklyPct;
+                        snap.Codex.WeeklyResetMin = xu.WeeklyResetMin;
+                    }
                 }
                 snap.Codex.ResetCreditsAvailable = xu.ResetCreditsAvailable;
                 snap.Codex.ResetCreditExpiresAt = xu.ResetCreditExpiresAt;
@@ -1043,6 +1056,14 @@ sealed class StatusService
                     }
                     if (TryProp(payload, "rate_limits", out var rl))
                     {
+                        // Named variants such as codex_bengalfox are
+                        // model-specific limits, not the account Codex quota.
+                        var limitId = StringVal(rl, "limit_id");
+                        if (!string.IsNullOrEmpty(limitId) && limitId != "codex")
+                        {
+                            doc.Dispose();
+                            continue;
+                        }
                         var e = ParseIso(StringVal(root, "timestamp")) ?? 0;
                         if (e >= latestRateLimitsTs)
                         {

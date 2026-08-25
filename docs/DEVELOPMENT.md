@@ -117,7 +117,8 @@ LaunchAgent（`~/Library/LaunchAgents/`）即可，未内置，按需再加。
   5h / 周窗口的已用百分比和重置时间；Codex 同时读取
   `/wham/rate-limit-reset-credits` 的 `available_count` 和最早到期的可用 `credits[].expires_at`，
   作为剩余可用重置次数及到期日，合并进 `/status` 下发给设备。接口 429 限流时
-  自动退避 5 分钟并沿用上一次的数值。
+  自动退避 5 分钟并沿用上一次的数值。Codex JSONL 中 `limit_id` 不为 `codex` 的命名额度
+  属于模型专属窗口，不得覆盖或补充账户 5h / 周额度。
 - Claude 的 OAuth token 存在 Keychain，app 通过 `security` CLI 读取，第一次运行
   macOS 可能弹一次授权框（选"始终允许"即可）；`~/.claude/.credentials.json` 存在时
   优先读文件。
@@ -192,8 +193,8 @@ pio device monitor -b 460800
 - 屏幕中央：对应角色的大幅像素动画（Claude = 跑步的 Dario，Codex = 戴耳机的宠物），
   仅在该角色 `working` 时播放动画，否则停在静止帧。
 - 屏幕四周一圈方形进度环：环的填充长度 = 供应商返回的真实用量百分比（Claude 用真实
-  5h 值；未知时为 0 且文字显示 `-`，不再用会话时长近似；Codex 优先真实 5h，5h
-  不存在时使用真实周额度）；环的颜色/动画参考
+  5h 值；未知时为 0 且文字显示 `-`，不再用会话时长近似；Codex 优先真实周额度/总额度，
+  仅在周额度不存在时回退真实 5h）；未填充部分保留深灰底轨，环的颜色/动画参考
   [vibecoding-signal-light](https://github.com/starlight36/vibecoding-signal-light)
   的红绿灯设计：
   - **常亮绿** = 空闲/离线，不需要关注

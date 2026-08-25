@@ -101,7 +101,7 @@ sealed class UsageFetcher
     static ProviderUsage Merge(ProviderUsage old, ProviderUsage fresh)
     {
         if (string.IsNullOrEmpty(fresh.Plan)) fresh.Plan = old.Plan;
-        if (!HasQuota(fresh) && HasQuota(old))
+        if (!fresh.FetchedAt.HasValue && !HasQuota(fresh) && HasQuota(old))
         {
             return new ProviderUsage
             {

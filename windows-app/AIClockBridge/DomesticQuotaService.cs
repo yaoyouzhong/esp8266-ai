@@ -426,17 +426,23 @@ sealed class DomesticQuotaAuthForm : Form
 
     readonly DomesticQuotaService _service;
     readonly bool _hideOnUserClose;
-    readonly WebView2 _web = new() { Dock = DockStyle.Fill };
+    WebView2 _web = CreateWebView();
+    readonly Panel _webHost = new() { Dock = DockStyle.Fill };
     readonly Dictionary<string, (string ProviderId, string Endpoint)> _quotaResponses = new();
     readonly Dictionary<string, Panel> _providerCards = new();
     CoreWebView2DevToolsProtocolEventReceiver _responseReceiver;
     CoreWebView2DevToolsProtocolEventReceiver _finishedReceiver;
+    CoreWebView2 _activeCore;
+    Task _webInitialization;
     DomesticProviderDefinition _activeProvider;
     string _initialProviderId;
     int _navigationGeneration;
+    int _webRecoveryRequest;
+    int _webRecoveryCount;
     bool _capturedForNavigation;
     bool _everShown;
     bool _backgroundRefresh;
+    bool _webRecoveryPending;
     readonly Label _providerTitle = new()
     {
         AutoSize = true, Font = new Font("Microsoft YaHei UI", 14, FontStyle.Bold),
@@ -519,7 +525,7 @@ sealed class DomesticQuotaAuthForm : Form
             ForeColor = Color.FromArgb(51, 65, 85), Location = new Point(760, 22),
         };
         refresh.FlatAppearance.BorderColor = Color.FromArgb(203, 213, 225);
-        refresh.Click += (_, _) => _web.CoreWebView2?.Reload();
+        refresh.Click += async (_, _) => await ReloadWebView();
         header.Resize += (_, _) => refresh.Left = header.ClientSize.Width - refresh.Width - 18;
         header.Controls.Add(_providerTitle);
         header.Controls.Add(_providerState);
@@ -530,7 +536,8 @@ sealed class DomesticQuotaAuthForm : Form
         _miniMaxKeyPanel.Controls.Add(_miniMaxSaveKey);
         _miniMaxKeyPanel.Resize += (_, _) => LayoutMiniMaxKeyPanel();
         LayoutMiniMaxKeyPanel();
-        content.Controls.Add(_web);
+        _webHost.Controls.Add(_web);
+        content.Controls.Add(_webHost);
         content.Controls.Add(_status);
         content.Controls.Add(_miniMaxKeyPanel);
         content.Controls.Add(header);
@@ -598,6 +605,19 @@ sealed class DomesticQuotaAuthForm : Form
     static DomesticProviderDefinition ProviderById(string providerId) =>
         DomesticProviderCatalog.All.FirstOrDefault(x => x.Id == providerId)
         ?? DomesticProviderCatalog.All[0];
+
+    static WebView2 CreateWebView() => new() { Dock = DockStyle.Fill };
+
+    internal uint BrowserProcessIdForTest
+    {
+        get
+        {
+            try { return _activeCore?.BrowserProcessId ?? 0; }
+            catch { return 0; }
+        }
+    }
+
+    internal int WebViewRecoveryCountForTest => _webRecoveryCount;
 
     protected override bool ShowWithoutActivation => _backgroundRefresh;
 
@@ -676,7 +696,15 @@ sealed class DomesticQuotaAuthForm : Form
             : "已列入厂商目录：可以登录控制台，准确额度读取规则尚待适配";
         _providerState.ForeColor = provider.CaptureSupported
             ? Color.FromArgb(22, 101, 52) : Color.FromArgb(180, 83, 9);
-        await Navigate(provider);
+        try
+        {
+            await Navigate(provider);
+        }
+        catch (InvalidOperationException ex)
+        {
+            if (QueueWebViewRecovery(provider))
+                StartupManager.Log($"quota WebView2 navigation rejected; recreating control: {ex.Message}");
+        }
     }
 
     void LayoutMiniMaxKeyPanel()
@@ -718,34 +746,7 @@ sealed class DomesticQuotaAuthForm : Form
     {
         var generation = ++_navigationGeneration;
         _capturedForNavigation = false;
-        if (_web.CoreWebView2 == null)
-        {
-            var profile = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "AIClockBridge", "quota-auth-profile");
-            var env = await CoreWebView2Environment.CreateAsync(null, profile);
-            await _web.EnsureCoreWebView2Async(env);
-            _web.CoreWebView2.Settings.IsPasswordAutosaveEnabled = false;
-            _web.CoreWebView2.Settings.AreDevToolsEnabled = false;
-            await _web.CoreWebView2.CallDevToolsProtocolMethodAsync("Network.enable", "{}");
-            _responseReceiver = _web.CoreWebView2.GetDevToolsProtocolEventReceiver("Network.responseReceived");
-            _finishedReceiver = _web.CoreWebView2.GetDevToolsProtocolEventReceiver("Network.loadingFinished");
-            _responseReceiver.DevToolsProtocolEventReceived += CdpResponseReceived;
-            _finishedReceiver.DevToolsProtocolEventReceived += CdpLoadingFinished;
-            _web.CoreWebView2.NavigationCompleted += async (_, e) =>
-            {
-                if (e.IsSuccess && _activeProvider?.Id is "qwen" or "kimi" or "minimax" or "deepseek")
-                    await PersistLoginCookies(_activeProvider.Url);
-                if (e.IsSuccess && _activeProvider?.Id == "kimi")
-                    _ = CaptureKimiPageMetadata(_navigationGeneration);
-                if (e.IsSuccess && _activeProvider?.Id == "qwen")
-                {
-                    _ = CaptureQwenPageMetadata(_navigationGeneration);
-                }
-                if (e.IsSuccess && _activeProvider?.Id == "deepseek")
-                    _ = CaptureDeepSeekPageMetadata(_navigationGeneration);
-            };
-        }
+        await EnsureWebView();
         _status.Text = provider.Id == "minimax" && _service.HasMiniMaxApiKey
             ? "MiniMax Key 已保存；后台刷新优先通过官方 API 查询额度。"
             : provider.CaptureSupported
@@ -753,6 +754,150 @@ sealed class DomesticQuotaAuthForm : Form
             : $"{provider.Name}已提供统一登录入口；当前版本暂不读取其额度数字。";
         _web.CoreWebView2.Navigate(provider.Url);
         if (provider.CaptureSupported) _ = ShowPendingStatus(provider, generation);
+    }
+
+    async Task EnsureWebView()
+    {
+        if (_web.CoreWebView2 != null) return;
+        var web = _web;
+        var initialization = _webInitialization ??= InitializeWebView(web);
+        try
+        {
+            await initialization;
+        }
+        finally
+        {
+            if (ReferenceEquals(_webInitialization, initialization) && initialization.IsCompleted)
+                _webInitialization = null;
+        }
+    }
+
+    async Task InitializeWebView(WebView2 web)
+    {
+        var profile = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "AIClockBridge", "quota-auth-profile");
+        var env = await CoreWebView2Environment.CreateAsync(null, profile);
+        await web.EnsureCoreWebView2Async(env);
+        if (!ReferenceEquals(web, _web) || web.IsDisposed) return;
+        _activeCore = web.CoreWebView2;
+        _activeCore.NavigationCompleted += WebViewNavigationCompleted;
+        _activeCore.ProcessFailed += WebViewProcessFailed;
+        _activeCore.Settings.IsPasswordAutosaveEnabled = false;
+        _activeCore.Settings.AreDevToolsEnabled = false;
+        await _activeCore.CallDevToolsProtocolMethodAsync("Network.enable", "{}");
+        _responseReceiver = _activeCore.GetDevToolsProtocolEventReceiver("Network.responseReceived");
+        _finishedReceiver = _activeCore.GetDevToolsProtocolEventReceiver("Network.loadingFinished");
+        _responseReceiver.DevToolsProtocolEventReceived += CdpResponseReceived;
+        _finishedReceiver.DevToolsProtocolEventReceived += CdpLoadingFinished;
+    }
+
+    async void WebViewNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
+    {
+        if (!ReferenceEquals(sender, _activeCore)) return;
+        if (e.IsSuccess && _activeProvider?.Id is "qwen" or "kimi" or "minimax" or "deepseek")
+            await PersistLoginCookies(_activeProvider.Url);
+        if (e.IsSuccess && _activeProvider?.Id == "kimi")
+            _ = CaptureKimiPageMetadata(_navigationGeneration);
+        if (e.IsSuccess && _activeProvider?.Id == "qwen")
+            _ = CaptureQwenPageMetadata(_navigationGeneration);
+        if (e.IsSuccess && _activeProvider?.Id == "deepseek")
+            _ = CaptureDeepSeekPageMetadata(_navigationGeneration);
+    }
+
+    void WebViewProcessFailed(object sender, CoreWebView2ProcessFailedEventArgs e)
+    {
+        if (!ReferenceEquals(sender, _activeCore)) return;
+        StartupManager.Log(
+            $"quota WebView2 process failed: kind={e.ProcessFailedKind}, reason={e.Reason}, "
+            + $"exit_code={e.ExitCode}, description={e.ProcessDescription}, "
+            + $"source={e.FailureSourceModulePath}");
+        if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.BrowserProcessExited)
+        {
+            QueueWebViewRecovery(_activeProvider ?? ProviderById(_initialProviderId));
+            return;
+        }
+        if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.RenderProcessExited)
+            BeginInvoke(async () => await ReloadWebView());
+    }
+
+    bool QueueWebViewRecovery(DomesticProviderDefinition provider)
+    {
+        if (_webRecoveryPending || IsDisposed || !IsHandleCreated) return false;
+        _webRecoveryPending = true;
+        var request = ++_webRecoveryRequest;
+        ++_navigationGeneration;
+        BeginInvoke(async () => await RecoverWebView(request, provider));
+        return true;
+    }
+
+    async Task RecoverWebView(int request, DomesticProviderDefinition provider)
+    {
+        try
+        {
+            var oldWeb = _web;
+            DetachWebViewEvents();
+            lock (_quotaResponses) _quotaResponses.Clear();
+            _webHost.Controls.Remove(oldWeb);
+            oldWeb.Dispose();
+            _web = CreateWebView();
+            _webHost.Controls.Add(_web);
+            _webInitialization = null;
+            _webRecoveryPending = false;
+            await Navigate(provider);
+            if (request != _webRecoveryRequest) return;
+            ++_webRecoveryCount;
+            StartupManager.Log(
+                $"quota WebView2 recovered: provider={provider.Id}, browser_pid={BrowserProcessIdForTest}");
+        }
+        catch (Exception ex)
+        {
+            StartupManager.Log($"quota WebView2 recovery failed: {ex}");
+            if (!IsDisposed) _status.Text = $"授权浏览器恢复失败：{ex.Message}；下次刷新将重试。";
+        }
+        finally
+        {
+            if (request == _webRecoveryRequest) _webRecoveryPending = false;
+        }
+    }
+
+    void DetachWebViewEvents()
+    {
+        try
+        {
+            if (_responseReceiver != null)
+                _responseReceiver.DevToolsProtocolEventReceived -= CdpResponseReceived;
+            if (_finishedReceiver != null)
+                _finishedReceiver.DevToolsProtocolEventReceived -= CdpLoadingFinished;
+            if (_activeCore != null)
+            {
+                _activeCore.NavigationCompleted -= WebViewNavigationCompleted;
+                _activeCore.ProcessFailed -= WebViewProcessFailed;
+            }
+        }
+        catch
+        {
+            // A failed browser process can reject COM event unsubscription.
+        }
+        _responseReceiver = null;
+        _finishedReceiver = null;
+        _activeCore = null;
+    }
+
+    async Task ReloadWebView()
+    {
+        try
+        {
+            if (_web.CoreWebView2 == null)
+                await Navigate(_activeProvider ?? ProviderById(_initialProviderId));
+            else
+                _web.CoreWebView2.Reload();
+        }
+        catch (InvalidOperationException ex)
+        {
+            if (QueueWebViewRecovery(_activeProvider ?? ProviderById(_initialProviderId)))
+                StartupManager.Log($"quota WebView2 reload rejected; recreating control: {ex.Message}");
+        }
     }
 
     async Task CaptureKimiPageMetadata(int generation)

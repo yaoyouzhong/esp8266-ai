@@ -69,6 +69,9 @@ sealed class MirrorControl : Control
 
     static readonly Color Green = Color.FromArgb(0, 217, 51);
     static readonly Color Yellow = Color.FromArgb(255, 204, 0);
+    static readonly Color ResetCreditYellow = Color.FromArgb(255, 255, 0);
+    static readonly Color ResetCreditBorderYellow = Color.FromArgb(173, 170, 0);
+    static readonly Color RingTrack = Color.FromArgb(42, 42, 42);
 
     public MirrorControl()
     {
@@ -160,6 +163,13 @@ sealed class MirrorControl : Control
         // square quota ring: margin 4, thickness 10, clockwise from top-left
         const float m = 4, t = 10;
         const float side = 240 - 2 * m;
+        using (var track = new SolidBrush(RingTrack))
+        {
+            g.FillRectangle(track, m, m, side, t);
+            g.FillRectangle(track, 240 - m - t, m, t, side);
+            g.FillRectangle(track, m, 240 - m - t, side, t);
+            g.FillRectangle(track, m, m, t, side);
+        }
         using (var ring = new SolidBrush(DeviceOK ? Green : Color.FromArgb(90, 90, 90)))
         {
             var remaining = side * 4 * (float)(Math.Clamp(RingPct, 0, 100) / 100);
@@ -331,27 +341,31 @@ sealed class MirrorControl : Control
     void DrawResetCreditBadge(Graphics g)
     {
         if (ShowingClaude || !ResetCreditsAvailable.HasValue || ResetCreditsAvailable.Value <= 0) return;
-        var color = Color.FromArgb(255, 55, 210);
-        using var countFont = new Font("Consolas", 7, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var dateFont = new Font("Consolas", 7, FontStyle.Regular, GraphicsUnit.Pixel);
-        var rect = new RectangleF(174, 28, 48, 24);
+        var color = ResetCreditYellow;
+        using var countFont = new Font("Consolas", 8, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var dateFont = new Font("Consolas", 8, FontStyle.Bold, GraphicsUnit.Pixel);
+        var rect = new RectangleF(161, 27, 64, 26);
         using var path = RoundedRect(rect, 5);
-        using var fill = new SolidBrush(Color.FromArgb(28, color));
-        using var border = new Pen(color, 1);
-        using var text = new SolidBrush(color);
-        using var fmt = new StringFormat
-        {
-            Alignment = StringAlignment.Center,
-            LineAlignment = StringAlignment.Center,
-        };
+        using var fill = new SolidBrush(Color.FromArgb(18, color));
+        using var border = new Pen(ResetCreditBorderYellow, 1);
+        using var countText = new SolidBrush(Green);
+        using var dateText = new SolidBrush(color);
+        var expiry = ResetCreditDate(ResetCreditExpiresAt);
+        var count = $"R*{ResetCreditsAvailable.Value}";
+        using var fmt = (StringFormat)StringFormat.GenericTypographic.Clone();
+        fmt.FormatFlags |= StringFormatFlags.NoWrap;
+        var countWidth = g.MeasureString(count, countFont, PointF.Empty, fmt).Width;
+        var dateWidth = expiry.Length > 0
+            ? g.MeasureString(expiry, dateFont, PointF.Empty, fmt).Width : 0;
+        var gap = expiry.Length > 0 ? 4f : 0;
+        var x = rect.X + (rect.Width - countWidth - gap - dateWidth) / 2;
         g.FillPath(fill, path);
         g.DrawPath(border, path);
-        var expiry = ResetCreditDate(ResetCreditExpiresAt);
-        g.DrawString($"RESET {ResetCreditsAvailable.Value}", countFont, text,
-            new RectangleF(rect.X, rect.Y + 1, rect.Width, 11), fmt);
+        g.DrawString(count, countFont, countText, x,
+            rect.Y + (rect.Height - countFont.GetHeight(g)) / 2, fmt);
         if (expiry.Length > 0)
-            g.DrawString(expiry, dateFont, text,
-                new RectangleF(rect.X, rect.Y + 11, rect.Width, 11), fmt);
+            g.DrawString(expiry, dateFont, dateText, x + countWidth + gap,
+                rect.Y + (rect.Height - dateFont.GetHeight(g)) / 2, fmt);
     }
 
     static Color PlanColor(string plan) => plan switch
@@ -631,20 +645,16 @@ sealed class MirrorControl : Control
             g.DrawString(name, appFont, name == "CLAUDE" ? Brushes.Orange : Brushes.Cyan, 31, top);
             if (resetCredits.HasValue && resetCredits.Value > 0)
             {
-                var color = Color.FromArgb(255, 55, 210);
-                var badge = new RectangleF(82, top, 24, 16);
-                using var badgePath = RoundedRect(badge, 4);
-                using var badgeFill = new SolidBrush(Color.FromArgb(28, color));
-                using var badgeBorder = new Pen(color, 1);
+                var color = ResetCreditYellow;
+                using var resetFont = new Font("Consolas", 9, FontStyle.Bold, GraphicsUnit.Pixel);
+                var badge = new RectangleF(81, top, 34, 17);
                 using var badgeText = new SolidBrush(color);
                 using var badgeFormat = new StringFormat
                 {
                     Alignment = StringAlignment.Center,
                     LineAlignment = StringAlignment.Center,
                 };
-                g.FillPath(badgeFill, badgePath);
-                g.DrawPath(badgeBorder, badgePath);
-                g.DrawString($"R{resetCredits.Value}", smallFont, badgeText, badge, badgeFormat);
+                g.DrawString($"R*{resetCredits.Value}", resetFont, badgeText, badge, badgeFormat);
             }
             if (!string.IsNullOrWhiteSpace(plan))
             {
@@ -1300,7 +1310,7 @@ sealed class MirrorForm : Form
         }
         else
         {
-            _mirror.RingPct = snap.Codex.PrimaryPct ?? snap.Codex.WeeklyPct ?? 0;
+            _mirror.RingPct = snap.Codex.WeeklyPct ?? snap.Codex.PrimaryPct ?? 0;
             _mirror.FiveHourPct = snap.Codex.PrimaryPct;
             _mirror.FiveHourResetMin = snap.Codex.PrimaryResetMin;
             _mirror.WeeklyPct = snap.Codex.WeeklyPct;

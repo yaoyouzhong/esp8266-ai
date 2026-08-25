@@ -70,6 +70,7 @@ uint32_t spriteRev = 0; // bumped on upload/reset so the Mac mirror re-fetches
 const int SCREEN_CX = 120, SCREEN_CY = 120;
 const int RING_MARGIN = 4;      // inset from screen edge
 const int RING_THICKNESS = 10;  // ring bar thickness
+const uint16_t RING_TRACK_COLOR = 0x2104; // visible dark grey on black
 const unsigned long ANIM_INTERVAL_MS = 120;  // sprite frame advance
 const unsigned long FLASH_INTERVAL_MS = 400; // "urgent" flash speed
 const unsigned long COMPLETION_PULSE_INTERVAL_MS = 140;
@@ -535,12 +536,12 @@ void drawSquareRing(float pct, uint16_t color) {
   int side = x1 - x0;
   float perimeter = side * 4.0;
 
-  // Unfilled track is drawn black so only the active quota portion is visible.
-  // It still needs repainting to erase a previously longer fill after reset.
-  tft.fillRect(x0, y0, side, RING_THICKNESS, TFT_BLACK);                  // top
-  tft.fillRect(x1 - RING_THICKNESS, y0, RING_THICKNESS, side, TFT_BLACK); // right
-  tft.fillRect(x0, y1 - RING_THICKNESS, side, RING_THICKNESS, TFT_BLACK); // bottom
-  tft.fillRect(x0, y0, RING_THICKNESS, side, TFT_BLACK);                  // left
+  // Keep the whole perimeter visible so a small percentage still reads as a
+  // progress ring instead of an isolated short status line.
+  tft.fillRect(x0, y0, side, RING_THICKNESS, RING_TRACK_COLOR);                  // top
+  tft.fillRect(x1 - RING_THICKNESS, y0, RING_THICKNESS, side, RING_TRACK_COLOR); // right
+  tft.fillRect(x0, y1 - RING_THICKNESS, side, RING_THICKNESS, RING_TRACK_COLOR); // bottom
+  tft.fillRect(x0, y0, RING_THICKNESS, side, RING_TRACK_COLOR);                  // left
 
   // filled portion, clockwise: top -> right -> bottom -> left
   float remaining = perimeter * (pct / 100.0);
@@ -821,12 +822,10 @@ void drawDualPlanBadge(const String &plan, int top) {
 
 void drawDualResetCreditBadge(int top) {
   if (codexStatus.resetCreditsAvailable <= 0) return;
-  uint16_t color = TFT_MAGENTA;
-  tft.fillRoundRect(82, top, 24, 17, 4, TFT_BLACK);
-  tft.drawRoundRect(82, top, 24, 17, 4, color);
+  uint16_t color = TFT_YELLOW;
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(color, TFT_BLACK);
-  tft.drawString("R" + String(codexStatus.resetCreditsAvailable), 94, top + 8, 1);
+  tft.drawString("R*" + String(codexStatus.resetCreditsAvailable), 98, top + 8, 2);
 }
 
 void drawDualRow(const char *label, float pct, int resetMin, int y) {
@@ -911,10 +910,10 @@ void drawPlanBadge(bool force) {
   String plan = currentPlan();
   if (!force && plan == lastPlanBadge) return;
   lastPlanBadge = plan;
-  tft.fillRect(60, 27, 112, 22, TFT_BLACK); // erase a previous, longer label
+  tft.fillRect(60, 27, 101, 22, TFT_BLACK); // erase a previous, longer label
   if (plan.length() == 0) return;
   uint16_t color = planColor(plan);
-  int w = constrain(tft.textWidth(plan, 2) + 12, 34, 100);
+  int w = constrain(tft.textWidth(plan, 2) + 12, 34, 98);
   tft.fillRoundRect(61, 29, w, 18, 5, TFT_BLACK);
   tft.drawRoundRect(61, 29, w, 18, 5, color);
   tft.setTextDatum(MC_DATUM);
@@ -923,8 +922,8 @@ void drawPlanBadge(bool force) {
 }
 
 void drawResetCreditBadge(bool force) {
-  String value = currentApp == APP_CODEX && codexStatus.resetCreditsAvailable > 0
-      ? "RESET " + String(codexStatus.resetCreditsAvailable) : "";
+  String count = currentApp == APP_CODEX && codexStatus.resetCreditsAvailable > 0
+      ? "R*" + String(codexStatus.resetCreditsAvailable) : "";
   String expiry;
   if (codexStatus.resetCreditExpiresAt > 0) {
     int year, month, day, hour, minute, second, weekday;
@@ -932,18 +931,24 @@ void drawResetCreditBadge(bool force) {
                  year, month, day, hour, minute, second, weekday);
     expiry = String(month) + "/" + String(day);
   }
-  String key = value + "|" + expiry;
+  String key = count + "|" + expiry;
   if (!force && key == lastResetCreditBadge) return;
   lastResetCreditBadge = key;
-  tft.fillRect(173, 26, 51, 28, TFT_BLACK);
-  if (value.length() == 0) return;
-  uint16_t color = TFT_MAGENTA;
-  tft.fillRoundRect(174, 28, 48, 24, 5, TFT_BLACK);
-  tft.drawRoundRect(174, 28, 48, 24, 5, color);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(color, TFT_BLACK);
-  tft.drawString(value, 198, 34, 1);
-  if (expiry.length() > 0) tft.drawString(expiry, 198, 45, 1);
+  tft.fillRect(160, 26, 65, 28, TFT_BLACK);
+  if (count.length() == 0) return;
+  tft.fillRoundRect(161, 27, 64, 26, 5, TFT_BLACK);
+  tft.drawRoundRect(161, 27, 64, 26, 5, 0xAD40);
+  int gap = expiry.length() > 0 ? 4 : 0;
+  int countWidth = tft.textWidth(count, 1);
+  int expiryWidth = expiry.length() > 0 ? tft.textWidth(expiry, 1) : 0;
+  int x = 193 - (countWidth + gap + expiryWidth) / 2;
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.drawString(count, x, 40, 1);
+  if (expiry.length() > 0) {
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.drawString(expiry, x + countWidth + gap, 40, 1);
+  }
 }
 
 // Claude's ring percentage is only a real 5h quota. Unknown never becomes an
@@ -953,8 +958,8 @@ float claudeRingPct() {
 }
 
 float codexRingPct() {
-  if (codexStatus.primaryPct >= 0) return codexStatus.primaryPct;
-  return max(codexStatus.weeklyPct, 0.0f);
+  if (codexStatus.weeklyPct >= 0) return codexStatus.weeklyPct;
+  return max(codexStatus.primaryPct, 0.0f);
 }
 
 // Redraws whichever app is currently active, full screen: quota ring +

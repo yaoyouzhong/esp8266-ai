@@ -3,7 +3,7 @@ using System.Drawing;
 
 namespace AIClockBridge;
 
-// Tray icon: the retro Macintosh device logo. Left click opens a live mirror
+// Tray icon: the AI clock robot logo. Left click opens a live mirror
 // of the ESP8266 screen (MirrorForm); right click opens the control menu with
 // usage meters and device remote control. No quota text lives in the tray
 // itself.
@@ -129,7 +129,7 @@ sealed class TrayAppContext : ApplicationContext
     /// dot). Full-color, matching the Mac menu-bar icon.
     static Icon TrayIconFromAsset()
     {
-        using var bmp = new Bitmap(MirrorControl.LoadAsset("happy-mac.png"),
+        using var bmp = new Bitmap(MirrorControl.LoadAsset("app-icon.png"),
                                    new Size(32, 32));
         var handle = bmp.GetHicon();
         // clone so the icon owns its data; the GetHicon handle would leak
