@@ -934,14 +934,14 @@ void drawResetCreditBadge(bool force) {
   String key = count + "|" + expiry;
   if (!force && key == lastResetCreditBadge) return;
   lastResetCreditBadge = key;
-  tft.fillRect(160, 26, 74, 28, TFT_BLACK);
+  tft.fillRect(156, 26, 70, 28, TFT_BLACK);
   if (count.length() == 0) return;
-  tft.fillRoundRect(161, 27, 72, 26, 5, TFT_BLACK);
-  tft.drawRoundRect(161, 27, 72, 26, 5, TFT_GREEN);
+  tft.fillRoundRect(157, 27, 68, 26, 5, TFT_BLACK);
+  tft.drawRoundRect(157, 27, 68, 26, 5, TFT_GREEN);
   int gap = expiry.length() > 0 ? 3 : 0;
   int countWidth = tft.textWidth(count, 2);
   int expiryWidth = expiry.length() > 0 ? tft.textWidth(expiry, 2) : 0;
-  int x = 197 - (countWidth + gap + expiryWidth) / 2;
+  int x = 191 - (countWidth + gap + expiryWidth) / 2;
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
   tft.drawString(count, x, 40, 2);

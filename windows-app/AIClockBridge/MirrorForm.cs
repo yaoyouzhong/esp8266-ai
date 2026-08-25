@@ -342,7 +342,7 @@ sealed class MirrorControl : Control
         var color = Green;
         using var countFont = new Font("Consolas", 9, FontStyle.Bold, GraphicsUnit.Pixel);
         using var dateFont = new Font("Consolas", 9, FontStyle.Bold, GraphicsUnit.Pixel);
-        var rect = new RectangleF(161, 27, 72, 26);
+        var rect = new RectangleF(157, 27, 68, 26);
         using var path = RoundedRect(rect, 5);
         using var fill = new SolidBrush(Color.FromArgb(18, color));
         using var border = new Pen(color, 1);
