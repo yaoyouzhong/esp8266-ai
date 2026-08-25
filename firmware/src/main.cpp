@@ -824,8 +824,7 @@ void drawDualResetCreditBadge(int top) {
   if (codexStatus.resetCreditsAvailable <= 0) return;
   uint16_t color = TFT_GREEN;
   tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(color, TFT_BLACK);
-  tft.drawString("R*" + String(codexStatus.resetCreditsAvailable), 98, top + 8, 2);
+  drawBoldString("R*" + String(codexStatus.resetCreditsAvailable), 98, top + 8, 2, color);
 }
 
 void drawDualRow(const char *label, float pct, int resetMin, int y) {

@@ -646,7 +646,6 @@ sealed class MirrorControl : Control
             if (resetCredits.HasValue && resetCredits.Value > 0)
             {
                 var color = Green;
-                using var resetFont = new Font("Consolas", 9, FontStyle.Bold, GraphicsUnit.Pixel);
                 var badge = new RectangleF(81, top, 34, 17);
                 using var badgeText = new SolidBrush(color);
                 using var badgeFormat = new StringFormat
@@ -654,7 +653,7 @@ sealed class MirrorControl : Control
                     Alignment = StringAlignment.Center,
                     LineAlignment = StringAlignment.Center,
                 };
-                g.DrawString($"R*{resetCredits.Value}", resetFont, badgeText, badge, badgeFormat);
+                g.DrawString($"R*{resetCredits.Value}", appFont, badgeText, badge, badgeFormat);
             }
             if (!string.IsNullOrWhiteSpace(plan))
             {
