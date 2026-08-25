@@ -385,6 +385,7 @@ static class Program
             Console.Error.WriteLine("[test-usb] device handshake timeout");
             return 1;
         }
+        var originalDisplayMode = "auto";
         try
         {
             for (var i = 0; i < 30 && usb.DeviceInfo == null; i++)
@@ -393,6 +394,22 @@ static class Program
                 await Task.Delay(100);
             }
             if (usb.DeviceInfo == null) throw new Exception("device info handshake did not complete");
+            originalDisplayMode = string.IsNullOrWhiteSpace(usb.DeviceInfo.Mode)
+                ? "auto" : usb.DeviceInfo.Mode;
+            usb.SetDisplayMode("codex");
+            await Task.Delay(500);
+            for (var i = 0; i < 20 && (usb.DeviceInfo?.Effective != "codex"
+                     || usb.DeviceInfo?.Showing != "codex"); i++)
+            {
+                usb.RequestInfo();
+                await Task.Delay(100);
+            }
+            if (usb.DeviceInfo?.Effective != "codex" || usb.DeviceInfo?.Showing != "codex")
+                throw new Exception($"Codex single quota page did not activate (effective={usb.DeviceInfo?.Effective ?? "--"}, showing={usb.DeviceInfo?.Showing ?? "--"})");
+            var codexQuota = service.Snapshot().Codex;
+            Console.Error.WriteLine($"[test-usb] Codex single quota page verified "
+                + $"(5H={(codexQuota.PrimaryPct.HasValue ? codexQuota.PrimaryPct.Value.ToString("F0") : "--")}, "
+                + $"WK={(codexQuota.WeeklyPct.HasValue ? codexQuota.WeeklyPct.Value.ToString("F0") : "--")})");
             for (var i = 0; i < 150 && (stocks.Snapshot.Length == 0 || weather.Current.UpdatedUtc == 0); i++)
                 await Task.Delay(100);
             if (stocks.Snapshot.Length == 0) throw new Exception("stock feed did not load");
@@ -571,9 +588,19 @@ static class Program
         catch (Exception e)
         {
             Console.Error.WriteLine($"[test-usb] failed: {e.Message}");
-            usb.SetDisplayMode("auto");
             usb.ResetSprite("claude");
             return 1;
+        }
+        finally
+        {
+            usb.SetDisplayMode(originalDisplayMode);
+            await Task.Delay(500);
+            usb.RequestInfo();
+            for (var i = 0; i < 20 && usb.DeviceInfo?.Mode != originalDisplayMode; i++)
+                await Task.Delay(100);
+            if (usb.DeviceInfo?.Mode != originalDisplayMode)
+                throw new Exception($"display mode restore failed (expected={originalDisplayMode}, actual={usb.DeviceInfo?.Mode ?? "--"})");
+            Console.Error.WriteLine($"[test-usb] display mode restored ({originalDisplayMode})");
         }
     }
 

@@ -229,7 +229,11 @@ sealed class MirrorControl : Control
                 g.DrawString(ResetText(reset), labelFont, Brushes.Cyan,
                     new RectangleF(154, y, 66, 22), center);
             }
-            if (!FiveHourPct.HasValue && WeeklyPct.HasValue)
+            // Match the firmware: Codex never grows a 5H row unless a real
+            // account 5H value exists, even while WK is temporarily unknown.
+            var singleWeeklyRow = !FiveHourPct.HasValue
+                && (!ShowingClaude || WeeklyPct.HasValue);
+            if (singleWeeklyRow)
             {
                 Panel(new RectangleF(20, 191, 200, 24), 7);
                 Row("WK", WeeklyPct, WeeklyResetMin, 192);

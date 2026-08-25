@@ -655,7 +655,12 @@ void serviceNtp() {
 }
 
 void drawQuotaText(float hourPct, int hourResetMin, float weekPct, int weekResetMin, bool force) {
-  bool single = hourPct < 0 && weekPct >= 0;
+  // A Codex 5H row exists only when the account endpoint returned a real 5H
+  // value.  If WK is also momentarily unavailable, keep the single WK layout
+  // instead of resurrecting a misleading 5H placeholder row.
+  bool single = currentApp == APP_CODEX
+      ? hourPct < 0
+      : (hourPct < 0 && weekPct >= 0);
   if (single != lastQuotaSingle) force = true;
   if (force) {
     tft.fillRect(18, 177, 204, 47, TFT_BLACK);
