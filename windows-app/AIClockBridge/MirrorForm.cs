@@ -340,9 +340,9 @@ sealed class MirrorControl : Control
     {
         if (ShowingClaude || !ResetCreditsAvailable.HasValue || ResetCreditsAvailable.Value <= 0) return;
         var color = Green;
-        using var countFont = new Font("Consolas", 8, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var dateFont = new Font("Consolas", 8, FontStyle.Bold, GraphicsUnit.Pixel);
-        var rect = new RectangleF(161, 27, 64, 26);
+        using var countFont = new Font("Consolas", 9, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var dateFont = new Font("Consolas", 9, FontStyle.Bold, GraphicsUnit.Pixel);
+        var rect = new RectangleF(161, 27, 72, 26);
         using var path = RoundedRect(rect, 5);
         using var fill = new SolidBrush(Color.FromArgb(18, color));
         using var border = new Pen(color, 1);
@@ -355,7 +355,7 @@ sealed class MirrorControl : Control
         var countWidth = g.MeasureString(count, countFont, PointF.Empty, fmt).Width;
         var dateWidth = expiry.Length > 0
             ? g.MeasureString(expiry, dateFont, PointF.Empty, fmt).Width : 0;
-        var gap = expiry.Length > 0 ? 4f : 0;
+        var gap = expiry.Length > 0 ? 3f : 0;
         var x = rect.X + (rect.Width - countWidth - gap - dateWidth) / 2;
         g.FillPath(fill, path);
         g.DrawPath(border, path);
