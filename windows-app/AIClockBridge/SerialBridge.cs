@@ -20,11 +20,13 @@ sealed class SerialBridge : IDisposable
     readonly NowPlayingMonitor _music;
     readonly StockMonitor _stocks;
     readonly WeatherMonitor _weather;
+    readonly object _portLock = new();
     readonly object _writeLock = new();
     readonly object _receiveLock = new();
     readonly System.Threading.Timer _scanTimer;
     readonly System.Threading.Timer _pushTimer;
-    SerialPort _port;
+    volatile SerialPort _port;
+    CancellationTokenSource _readCancellation;
     DateTime _lastHelloAt = DateTime.MinValue;
     DateTime _lastNetAt = DateTime.MinValue;
     DateTime _lastMusicAt = DateTime.MinValue;
@@ -108,9 +110,10 @@ sealed class SerialBridge : IDisposable
             var ports = CandidatePorts(preferred);
             foreach (var name in ports)
             {
+                SerialPort port = null;
                 try
                 {
-                    var port = new SerialPort(name, BaudRate)
+                    port = new SerialPort(name, BaudRate)
                     {
                         Encoding = Encoding.UTF8,
                         NewLine = "\n",
@@ -119,9 +122,20 @@ sealed class SerialBridge : IDisposable
                         DtrEnable = false,
                         RtsEnable = false,
                     };
-                    port.DataReceived += OnDataReceived;
                     port.Open();
-                    _port = port;
+                    var readCancellation = new CancellationTokenSource();
+                    lock (_portLock)
+                    {
+                        if (_hostGoingAway)
+                        {
+                            readCancellation.Dispose();
+                            port.Dispose();
+                            return;
+                        }
+                        _port = port;
+                        _readCancellation = readCancellation;
+                    }
+                    _ = ReadLoop(port, readCancellation.Token);
                     _portOpenedAt = DateTime.UtcNow;
                     Send("hello");
                     // Opening a USB serial port may reset some CH340 boards;
@@ -133,9 +147,9 @@ sealed class SerialBridge : IDisposable
                         Console.Error.WriteLine($"[usb] connected on {name}");
                         return;
                     }
-                    ClosePort();
+                    ClosePort(port);
                 }
-                catch { ClosePort(); }
+                catch { ClosePort(port); }
             }
         }
         finally { _scanning = false; }
@@ -168,25 +182,38 @@ sealed class SerialBridge : IDisposable
             .ToArray();
     }
 
-    void OnDataReceived(object sender, SerialDataReceivedEventArgs e)
+    async Task ReadLoop(SerialPort port, CancellationToken cancellationToken)
     {
-        byte[] bytes;
+        // Do not use SerialPort.DataReceived here. System.IO.Ports queues that
+        // callback separately from Close(), so active UART traffic can race
+        // handler removal and terminate the process (dotnet/runtime#44952).
+        var buffer = new byte[4096];
         try
         {
-            var port = sender as SerialPort;
-            var count = port?.BytesToRead ?? 0;
-            if (count <= 0) return;
-            bytes = new byte[count];
-            var read = port.Read(bytes, 0, count);
-            if (read != bytes.Length) Array.Resize(ref bytes, read);
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var available = port.BytesToRead;
+                if (available <= 0)
+                {
+                    await Task.Delay(10, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+                var read = port.Read(buffer, 0, Math.Min(available, buffer.Length));
+                if (read > 0) ProcessReceivedBytes(buffer.AsSpan(0, read));
+            }
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested) { }
         catch (Exception error)
         {
-            Console.Error.WriteLine($"[usb] receive failed: {error.Message}");
-            ClosePort();
-            return;
+            if (ReferenceEquals(_port, port))
+                Console.Error.WriteLine($"[usb] receive failed: {error.Message}");
         }
+        finally { ClosePort(port); }
+    }
 
+    void ProcessReceivedBytes(ReadOnlySpan<byte> bytes)
+    {
         lock (_receiveLock)
         {
             foreach (var value in bytes)
@@ -760,11 +787,33 @@ sealed class SerialBridge : IDisposable
         }
     }
 
-    void ClosePort()
+    void ClosePort(SerialPort expected = null)
     {
-        var port = Interlocked.Exchange(ref _port, null);
+        SerialPort port;
+        CancellationTokenSource readCancellation = null;
+        var resetState = false;
+        lock (_portLock)
+        {
+            if (expected != null && !ReferenceEquals(_port, expected))
+            {
+                port = expected;
+            }
+            else
+            {
+                port = _port;
+                if (port == null) return;
+                _port = null;
+                readCancellation = _readCancellation;
+                _readCancellation = null;
+                resetState = true;
+            }
+        }
         if (port == null) return;
-        try { port.DataReceived -= OnDataReceived; port.Close(); port.Dispose(); } catch { }
+        try { readCancellation?.Cancel(); } catch (ObjectDisposedException) { }
+        readCancellation?.Dispose();
+        try { port.Close(); } catch { }
+        try { port.Dispose(); } catch { }
+        if (!resetState) return;
         _lastHelloAt = DateTime.MinValue;
         _portOpenedAt = DateTime.MinValue;
         _lastPingAt = DateTime.MinValue;
