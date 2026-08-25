@@ -198,8 +198,8 @@ sealed class MirrorControl : Control
 
         // app logo, top-left inside the ring (firmware draws it at 14,18 @40px)
         g.DrawImage(ShowingClaude ? ClaudeLogo : CodexLogo, new Rectangle(14, 18, 40, 40));
-        DrawPlanBadge(g);
         DrawResetCreditBadge(g);
+        DrawPlanBadge(g);
 
         // Window, used percentage and reset countdown share each row, so the
         // existing pet keeps its size and position.
@@ -320,7 +320,9 @@ sealed class MirrorControl : Control
         if (string.IsNullOrEmpty(Plan)) return;
         var color = PlanColor(Plan);
         using var font = new Font("Consolas", 10, FontStyle.Bold, GraphicsUnit.Pixel);
-        var width = Math.Clamp((int)Math.Ceiling(g.MeasureString(Plan, font).Width) + 12, 34, 100);
+        var hasResetBadge = !ShowingClaude && ResetCreditsAvailable.HasValue && ResetCreditsAvailable.Value > 0;
+        var maxWidth = hasResetBadge ? 88 : 100;
+        var width = Math.Clamp((int)Math.Ceiling(g.MeasureString(Plan, font).Width) + 12, 34, maxWidth);
         var rect = new RectangleF(61, 29, width, 18);
         using var path = RoundedRect(rect, 5);
         using var fill = new SolidBrush(Color.FromArgb(35, color));
@@ -340,11 +342,11 @@ sealed class MirrorControl : Control
     {
         if (ShowingClaude || !ResetCreditsAvailable.HasValue || ResetCreditsAvailable.Value <= 0) return;
         var color = Green;
-        using var countFont = new Font("Consolas", 9, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var dateFont = new Font("Consolas", 9, FontStyle.Bold, GraphicsUnit.Pixel);
-        var rect = new RectangleF(157, 27, 68, 26);
+        using var countFont = new Font("Consolas", 10, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var dateFont = new Font("Consolas", 10, FontStyle.Bold, GraphicsUnit.Pixel);
+        var rect = new RectangleF(153, 29, 68, 18);
         using var path = RoundedRect(rect, 5);
-        using var fill = new SolidBrush(Color.FromArgb(18, color));
+        using var fill = new SolidBrush(Color.FromArgb(35, color));
         using var border = new Pen(color, 1);
         using var countText = new SolidBrush(Green);
         using var dateText = new SolidBrush(color);

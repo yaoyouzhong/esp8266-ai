@@ -908,12 +908,16 @@ String lastResetCreditBadge;
 
 void drawPlanBadge(bool force) {
   String plan = currentPlan();
-  if (!force && plan == lastPlanBadge) return;
-  lastPlanBadge = plan;
-  tft.fillRect(60, 27, 101, 22, TFT_BLACK); // erase a previous, longer label
+  bool reserveResetSpace = currentApp == APP_CODEX && codexStatus.resetCreditsAvailable > 0;
+  String key = plan + "|" + String(reserveResetSpace);
+  if (!force && key == lastPlanBadge) return;
+  lastPlanBadge = key;
+  int clearWidth = reserveResetSpace ? 92 : 101;
+  int maxWidth = reserveResetSpace ? 88 : 98;
+  tft.fillRect(60, 27, clearWidth, 22, TFT_BLACK); // erase a previous, longer label
   if (plan.length() == 0) return;
   uint16_t color = planColor(plan);
-  int w = constrain(tft.textWidth(plan, 2) + 12, 34, 98);
+  int w = constrain(tft.textWidth(plan, 2) + 12, 34, maxWidth);
   tft.fillRoundRect(61, 29, w, 18, 5, TFT_BLACK);
   tft.drawRoundRect(61, 29, w, 18, 5, color);
   tft.setTextDatum(MC_DATUM);
@@ -934,19 +938,22 @@ void drawResetCreditBadge(bool force) {
   String key = count + "|" + expiry;
   if (!force && key == lastResetCreditBadge) return;
   lastResetCreditBadge = key;
-  tft.fillRect(156, 26, 70, 28, TFT_BLACK);
+  const int badgeX = 153;
+  const int badgeW = 68;
+  const int badgeCenterX = badgeX + badgeW / 2;
+  tft.fillRect(badgeX - 1, 27, badgeW + 2, 22, TFT_BLACK);
   if (count.length() == 0) return;
-  tft.fillRoundRect(157, 27, 68, 26, 5, TFT_BLACK);
-  tft.drawRoundRect(157, 27, 68, 26, 5, TFT_GREEN);
+  tft.fillRoundRect(badgeX, 29, badgeW, 18, 5, TFT_BLACK);
+  tft.drawRoundRect(badgeX, 29, badgeW, 18, 5, TFT_GREEN);
   int gap = expiry.length() > 0 ? 3 : 0;
   int countWidth = tft.textWidth(count, 2);
   int expiryWidth = expiry.length() > 0 ? tft.textWidth(expiry, 2) : 0;
-  int x = 191 - (countWidth + gap + expiryWidth) / 2;
+  int x = badgeCenterX - (countWidth + gap + expiryWidth) / 2;
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.drawString(count, x, 40, 2);
+  tft.drawString(count, x, 38, 2);
   if (expiry.length() > 0)
-    tft.drawString(expiry, x + countWidth + gap, 40, 2);
+    tft.drawString(expiry, x + countWidth + gap, 38, 2);
 }
 
 // Claude's ring percentage is only a real 5h quota. Unknown never becomes an
@@ -983,8 +990,8 @@ void drawActiveApp() {
   }
   if (showingCd != CD_NONE) drawCountdown(true);
   drawAppLogo();
-  drawPlanBadge(true);
   drawResetCreditBadge(true);
+  drawPlanBadge(true);
 }
 
 // In-place refresh after a bridge poll: ring repaint + only the text that
@@ -1007,8 +1014,8 @@ void refreshActiveApp() {
     syncCountdownDeadline();
     drawCountdown(false);
   }
-  drawPlanBadge(false);
   drawResetCreditBadge(false);
+  drawPlanBadge(false);
 }
 
 // Redraws just the ring (cheap) - used for status color animation ticks
