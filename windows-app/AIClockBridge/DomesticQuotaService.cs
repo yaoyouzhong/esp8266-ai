@@ -1730,11 +1730,26 @@ sealed class DomesticQuotaAuthForm : Form
     {
         if (!values.TryGetValue(name, out var value)) return null;
         if (value.ValueKind == JsonValueKind.String)
-            return DomesticQuotaService.ParseResetAt(value.GetString());
-        if (value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var seconds)
-            && seconds > 0 && seconds <= 31 * 24 * 3600)
-            return DateTimeOffset.Now.AddSeconds(seconds);
-        return DateTimeValue(value);
+        {
+            var text = value.GetString()?.Trim() ?? "";
+            if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture,
+                    out var milliseconds))
+                return MiniMaxRemainingMilliseconds(milliseconds);
+            return DomesticQuotaService.ParseResetAt(text);
+        }
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var numeric))
+            return MiniMaxRemainingMilliseconds(numeric);
+        return null;
+    }
+
+    static DateTimeOffset? MiniMaxRemainingMilliseconds(double milliseconds)
+    {
+        // MiniMax's remains_time and weekly_remains_time are countdowns in
+        // milliseconds. Treating them as seconds produced multi-day 5H resets;
+        // larger weekly values then failed to parse and left stale cache dates.
+        var maxWindow = TimeSpan.FromDays(8).TotalMilliseconds;
+        return double.IsFinite(milliseconds) && milliseconds >= 0 && milliseconds <= maxWindow
+            ? DateTimeOffset.Now.AddMilliseconds(milliseconds) : null;
     }
 
     static string FindMiniMaxMembership(Dictionary<string, JsonElement> values)

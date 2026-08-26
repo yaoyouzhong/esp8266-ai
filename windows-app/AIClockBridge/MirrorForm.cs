@@ -493,12 +493,18 @@ sealed class MirrorControl : Control
 
         if (!isBalance)
         {
-            using (var right = new StringFormat(centered) { Alignment = StringAlignment.Far })
-            {
-                g.DrawString(isWindowed ? "RESET" : "REMAINING", smallFont, mutedBrush, 37, 153);
-                g.DrawString(isWindowed ? ResetText(p.WeeklyResetMin) : remaining, labelFont, greenBrush,
-                    new RectangleF(95, 149, 108, 20), right);
-            }
+            const float resetBaseline = 164;
+            using var resetFormat = (StringFormat)StringFormat.GenericTypographic.Clone();
+            resetFormat.FormatFlags |= StringFormatFlags.NoWrap;
+            var smallAscent = smallFont.Size * smallFont.FontFamily.GetCellAscent(smallFont.Style)
+                / smallFont.FontFamily.GetEmHeight(smallFont.Style);
+            var valueAscent = labelFont.Size * labelFont.FontFamily.GetCellAscent(labelFont.Style)
+                / labelFont.FontFamily.GetEmHeight(labelFont.Style);
+            g.DrawString(isWindowed ? "RESET" : "REMAINING", smallFont, mutedBrush,
+                new PointF(37, resetBaseline - smallAscent), resetFormat);
+            resetFormat.Alignment = StringAlignment.Far;
+            g.DrawString(isWindowed ? ResetText(p.WeeklyResetMin) : remaining, labelFont, greenBrush,
+                new PointF(203, resetBaseline - valueAscent), resetFormat);
         }
 
         using (var panel = RoundedRect(new RectangleF(20, 177, 200, 38), 8))

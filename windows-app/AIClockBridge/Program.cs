@@ -79,6 +79,11 @@ static class Program
             Environment.Exit(TestQuotaWindow());
             return;
         }
+        if (args.Length >= 1 && args[0] == "--test-minimax-quota-parser")
+        {
+            Environment.Exit(TestMiniMaxQuotaParser());
+            return;
+        }
         if (args.Length >= 1 && args[0] == "--test-webview-recovery")
         {
             Environment.Exit(TestWebViewRecovery());
@@ -300,6 +305,49 @@ static class Program
         form.RefreshInBackground("qwen");
         timer.Start();
         Application.Run();
+        return passed ? 0 : 1;
+    }
+
+    static int TestMiniMaxQuotaParser()
+    {
+        const string json = """
+        {
+          "model_remains": [
+            {
+              "model_name": "video",
+              "remains_time": 23965834,
+              "weekly_remains_time": 23965834,
+              "current_interval_remaining_percent": 100,
+              "current_weekly_remaining_percent": 100
+            },
+            {
+              "model_name": "general",
+              "remains_time": 14998196,
+              "weekly_remains_time": 547798196,
+              "current_interval_remaining_percent": 99,
+              "current_weekly_remaining_percent": 99
+            }
+          ]
+        }
+        """;
+        using var doc = JsonDocument.Parse(json);
+        var before = DateTimeOffset.Now;
+        var usage = DomesticQuotaAuthForm.FindMiniMaxUsage(doc.RootElement);
+        var after = DateTimeOffset.Now;
+        var fiveHourMin = usage?.FiveHourResetAt.HasValue == true
+            ? (usage.Value.FiveHourResetAt.Value - before).TotalMinutes : double.NaN;
+        var weeklyMin = usage?.WeeklyResetAt.HasValue == true
+            ? (usage.Value.WeeklyResetAt.Value - before).TotalMinutes : double.NaN;
+        var passed = usage.HasValue
+            && Math.Abs(usage.Value.FiveHourPct.GetValueOrDefault() - 1) < 0.001
+            && Math.Abs(usage.Value.WeeklyPct - 1) < 0.001
+            && fiveHourMin >= 249 && fiveHourMin <= 251
+            && weeklyMin >= 9129 && weeklyMin <= 9131
+            && usage.Value.FiveHourResetAt >= before && usage.Value.FiveHourResetAt <= after.AddMinutes(251)
+            && usage.Value.WeeklyResetAt >= before && usage.Value.WeeklyResetAt <= after.AddMinutes(9131);
+        Console.Error.WriteLine(passed
+            ? $"[test-minimax-quota-parser] 5H={fiveHourMin:0.0}m, weekly={weeklyMin:0.0}m"
+            : $"[test-minimax-quota-parser] failed: 5H={fiveHourMin:0.0}m, weekly={weeklyMin:0.0}m");
         return passed ? 0 : 1;
     }
 

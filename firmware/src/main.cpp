@@ -1498,12 +1498,12 @@ void drawDomesticScreen(bool force = false) {
   if (force || !domesticDrawCache.initialized || remaining != domesticDrawCache.remaining) {
     tft.fillRect(30, 151, 180, 16, TFT_BLACK);
     if (!isBalance) {
+      const int resetBaselineY = 164;
       tft.setTextDatum(TL_DATUM);
       tft.setTextColor(mutedColor, TFT_BLACK);
-      tft.drawString(isWindowed ? "RESET" : "REMAINING", 37, 153, 1);
-      tft.setTextDatum(TR_DATUM);
-      tft.setTextColor(TFT_GREEN, TFT_BLACK);
-      tft.drawString(remaining, 203, 151, 2);
+      tft.drawString(isWindowed ? "RESET" : "REMAINING", 37, resetBaselineY - 7, 1);
+      tft.setTextDatum(R_BASELINE);
+      drawBoldString(remaining, 203, resetBaselineY, 2, TFT_GREEN);
     }
   }
   if (force || !domesticDrawCache.initialized || tokens != domesticDrawCache.tokens
