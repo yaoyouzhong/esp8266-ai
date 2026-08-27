@@ -598,6 +598,40 @@ void drawBoldString(const String &s, int x, int y, int font, uint16_t color) {
   tft.drawString(s, x + 1, y, font);
 }
 
+// Scale a packed TFT_eSPI font through a short-lived 1-bit buffer. This keeps
+// the established glyph style when the built-in size steps are too coarse.
+bool drawScaledPackedText(const String &s, int x, int y, int font,
+                          int sourceWidth, int sourceHeight,
+                          int targetWidth, int targetHeight,
+                          uint16_t color, bool bold) {
+  TFT_eSprite sprite(&tft);
+  sprite.setColorDepth(1);
+  if (!sprite.createSprite(sourceWidth, sourceHeight)) return false;
+
+  sprite.fillSprite(TFT_BLACK);
+  sprite.setTextDatum(TL_DATUM);
+  sprite.setTextColor(TFT_WHITE, TFT_BLACK);
+  sprite.drawString(s, 0, 0, font);
+  if (bold) sprite.drawString(s, 1, 0, font);
+
+  for (int targetY = 0; targetY < targetHeight; targetY++) {
+    int sourceY = targetY * sourceHeight / targetHeight;
+    int runStart = -1;
+    for (int targetX = 0; targetX <= targetWidth; targetX++) {
+      int sourceX = targetX < targetWidth ? targetX * sourceWidth / targetWidth : 0;
+      bool set = targetX < targetWidth
+          && sprite.readPixelValue(sourceX, sourceY) != 0;
+      if (set && runStart < 0) runStart = targetX;
+      if (!set && runStart >= 0) {
+        tft.drawFastHLine(x + runStart, y + targetY, targetX - runStart, color);
+        runStart = -1;
+      }
+    }
+  }
+  sprite.deleteSprite();
+  return true;
+}
+
 void drawQuotaRow(const char *label, float pct, int resetMin, int y, bool force,
                   String &lastPct, String &lastReset) {
   String value = pctText(pct);
@@ -1431,34 +1465,47 @@ void drawDomesticScreen(bool force = false) {
       const int areaX = 20, areaY = 62, areaW = 200, areaH = 106;
       const int maxContentW = areaW - 16, maxContentH = areaH - 16;
       int captionFont = 2, valueFont = 6, currencyFont = 4;
+      bool scaleValue = true;
+      bool scaleCurrency = true;
       int lineGap = 8, valueGap = suffix.length() ? 6 : 0;
       int captionWidth = tft.textWidth(caption, captionFont);
-      int numberWidth = tft.textWidth(planNumber, valueFont) + 1;
-      int suffixWidth = suffix.length() ? tft.textWidth(suffix, currencyFont) : 0;
+      int sourceNumberWidth = tft.textWidth(planNumber, valueFont) + 1;
+      int numberWidth = (sourceNumberWidth * 5 + 3) / 6;
+      int valueHeight = 40;
+      int sourceSuffixWidth = suffix.length() ? tft.textWidth(suffix, currencyFont) : 0;
+      int suffixWidth = (sourceSuffixWidth * 10 + 6) / 13;
+      int currencyHeight = 20;
       int valueWidth = numberWidth + valueGap + suffixWidth;
-      int componentHeight = tft.fontHeight(captionFont) + lineGap + tft.fontHeight(valueFont);
+      int componentHeight = tft.fontHeight(captionFont) + lineGap + valueHeight;
 
       // Keep the balance dominant and CNY secondary. Built-in fonts have
       // discrete sizes, so choose the largest complete layout that fits.
       if (max(captionWidth, valueWidth) > maxContentW || componentHeight > maxContentH) {
+        scaleValue = false;
         valueFont = 4;
         captionWidth = tft.textWidth(caption, captionFont);
-        numberWidth = tft.textWidth(planNumber, valueFont) + 1;
-        suffixWidth = suffix.length() ? tft.textWidth(suffix, currencyFont) : 0;
+        sourceNumberWidth = tft.textWidth(planNumber, valueFont) + 1;
+        numberWidth = sourceNumberWidth;
+        valueHeight = tft.fontHeight(valueFont);
         valueWidth = numberWidth + valueGap + suffixWidth;
-        componentHeight = tft.fontHeight(captionFont) + lineGap + tft.fontHeight(valueFont);
+        componentHeight = tft.fontHeight(captionFont) + lineGap + valueHeight;
       }
       if (max(captionWidth, valueWidth) > maxContentW || componentHeight > maxContentH) {
         captionFont = 1;
         valueFont = 2;
         currencyFont = 1;
+        scaleCurrency = false;
         lineGap = 6;
         valueGap = suffix.length() ? 4 : 0;
         captionWidth = tft.textWidth(caption, captionFont);
-        numberWidth = tft.textWidth(planNumber, valueFont) + 1;
-        suffixWidth = suffix.length() ? tft.textWidth(suffix, currencyFont) : 0;
+        sourceNumberWidth = tft.textWidth(planNumber, valueFont) + 1;
+        numberWidth = sourceNumberWidth;
+        valueHeight = tft.fontHeight(valueFont);
+        sourceSuffixWidth = suffix.length() ? tft.textWidth(suffix, currencyFont) : 0;
+        suffixWidth = sourceSuffixWidth;
+        currencyHeight = tft.fontHeight(currencyFont);
         valueWidth = numberWidth + valueGap + suffixWidth;
-        componentHeight = tft.fontHeight(captionFont) + lineGap + tft.fontHeight(valueFont);
+        componentHeight = tft.fontHeight(captionFont) + lineGap + valueHeight;
       }
 
       const int centerX = areaX + areaW / 2;
@@ -1469,14 +1516,40 @@ void drawDomesticScreen(bool force = false) {
       tft.setTextDatum(TL_DATUM);
       tft.setTextColor(mutedColor, TFT_BLACK);
       tft.drawString(caption, centerX - captionWidth / 2, top, captionFont);
-      drawBoldString(planNumber, valueLeft, valueTop, valueFont, numberColor);
+      if (scaleValue) {
+        if (!drawScaledPackedText(planNumber, valueLeft, valueTop, 6,
+                                  sourceNumberWidth, 48, numberWidth, 40,
+                                  numberColor, true)) {
+          // Keep the previous rendering if the roughly 1KB bitmap cannot be allocated.
+          numberWidth = sourceNumberWidth;
+          valueHeight = tft.fontHeight(6);
+          valueWidth = numberWidth + valueGap + suffixWidth;
+          valueLeft = centerX - valueWidth / 2;
+          drawBoldString(planNumber, valueLeft, valueTop, 6, numberColor);
+        }
+      } else {
+        drawBoldString(planNumber, valueLeft, valueTop, valueFont, numberColor);
+      }
       if (suffixWidth) {
         tft.setTextColor(TFT_GREEN, TFT_BLACK);
-        int baselineCorrection = valueFont == 6 && currencyFont == 4 ? 8
+        int baselineCorrection = scaleCurrency && valueHeight == 40 ? 8
+            : scaleCurrency && valueHeight == 48 ? 10
+            : scaleCurrency && valueHeight == 26 ? 5
             : valueFont == currencyFont ? 0 : 2;
-        int currencyTop = valueTop + tft.fontHeight(valueFont)
-            - tft.fontHeight(currencyFont) - baselineCorrection;
-        tft.drawString(suffix, valueLeft + numberWidth + valueGap, currencyTop, currencyFont);
+        int currencyTop = valueTop + valueHeight
+            - currencyHeight - baselineCorrection;
+        int currencyLeft = valueLeft + numberWidth + valueGap;
+        if (scaleCurrency) {
+          if (!drawScaledPackedText(suffix, currencyLeft, currencyTop, 4,
+                                    sourceSuffixWidth, 26, suffixWidth, 20,
+                                    TFT_GREEN, false)) {
+            int fallbackWidth = tft.textWidth(suffix, 2);
+            tft.drawString(suffix, currencyLeft + (suffixWidth - fallbackWidth) / 2,
+                           currencyTop + 2, 2);
+          }
+        } else {
+          tft.drawString(suffix, currencyLeft, currencyTop, currencyFont);
+        }
       }
     } else {
       tft.fillRect(28, 90, 184, 54, TFT_BLACK);

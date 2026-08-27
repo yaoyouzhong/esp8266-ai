@@ -567,18 +567,18 @@ sealed class MirrorControl : Control
         using var typographic = (StringFormat)StringFormat.GenericTypographic.Clone();
         typographic.FormatFlags |= StringFormatFlags.NoWrap;
 
-        float valueSize = 48;
+        float valueSize = 40;
         float captionSize = 16;
-        float currencySize = 26;
+        float currencySize = 20;
         float lineGap = 8;
         float valueGap = string.IsNullOrEmpty(currency) ? 0 : 6;
         for (; valueSize >= 20; valueSize -= 1)
         {
-            captionSize = Math.Clamp((float)Math.Round(valueSize * 0.34f), 10, 16);
-            currencySize = Math.Clamp((float)Math.Round(valueSize * 0.55f), 12, 26);
-            lineGap = Math.Clamp((float)Math.Round(valueSize * 0.17f), 5, 8);
+            captionSize = Math.Clamp((float)Math.Round(valueSize * 0.40f), 10, 16);
+            currencySize = Math.Clamp((float)Math.Round(valueSize * 0.50f), 12, 20);
+            lineGap = Math.Clamp((float)Math.Round(valueSize * 0.20f), 5, 8);
             valueGap = string.IsNullOrEmpty(currency) ? 0
-                : Math.Clamp((float)Math.Round(valueSize * 0.13f), 4, 6);
+                : Math.Clamp((float)Math.Round(valueSize * 0.15f), 4, 6);
             using var testCaptionFont = new Font("Consolas", captionSize, FontStyle.Regular, GraphicsUnit.Pixel);
             using var testValueFont = new Font("Consolas", valueSize, FontStyle.Bold, GraphicsUnit.Pixel);
             using var testCurrencyFont = new Font("Consolas", currencySize, FontStyle.Bold, GraphicsUnit.Pixel);
