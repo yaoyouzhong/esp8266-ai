@@ -16,6 +16,7 @@
 #include <TFT_eSPI.h>
 #include <AnimatedGIF.h>
 #include <time.h>
+#include <vector>
 
 #include "config.h"
 #include "img/claude_sprite.h"
@@ -273,6 +274,7 @@ struct CodexStatus {
   int weeklyResetMin = -1;
   int resetCreditsAvailable = -1;
   uint32_t resetCreditExpiresAt = 0;
+  std::vector<uint32_t> resetCreditExpiresAtList;
   bool needsInput = false;
   uint32_t completionAt = 0;
 };
@@ -943,10 +945,18 @@ uint16_t planColor(const String &plan) {
 
 String lastPlanBadge;
 String lastResetCreditBadge;
+int lastResetCreditRows = 0;
+
+int resetCreditRecordCount() {
+  if (currentApp != APP_CODEX) return 0;
+  if (!codexStatus.resetCreditExpiresAtList.empty())
+    return codexStatus.resetCreditExpiresAtList.size();
+  return codexStatus.resetCreditsAvailable > 0 ? 1 : 0;
+}
 
 void drawPlanBadge(bool force) {
   String plan = currentPlan();
-  bool reserveResetSpace = currentApp == APP_CODEX && codexStatus.resetCreditsAvailable > 0;
+  bool reserveResetSpace = resetCreditRecordCount() > 0;
   String key = plan + "|" + String(reserveResetSpace);
   if (!force && key == lastPlanBadge) return;
   lastPlanBadge = key;
@@ -964,34 +974,51 @@ void drawPlanBadge(bool force) {
 }
 
 void drawResetCreditBadge(bool force) {
-  String count = currentApp == APP_CODEX && codexStatus.resetCreditsAvailable > 0
-      ? "R*" + String(codexStatus.resetCreditsAvailable) : "";
-  String expiry;
-  if (codexStatus.resetCreditExpiresAt > 0) {
-    int year, month, day, hour, minute, second, weekday;
-    epochToLocal(codexStatus.resetCreditExpiresAt, bridgeUtcOffsetS,
-                 year, month, day, hour, minute, second, weekday);
-    expiry = String(month) + "/" + String(day);
-  }
-  String key = count + "|" + expiry;
+  int rows = resetCreditRecordCount();
+  String key = String(rows) + "|" + String(codexStatus.resetCreditsAvailable);
+  for (uint32_t expiresAt : codexStatus.resetCreditExpiresAtList)
+    key += "|" + String(expiresAt);
+  if (codexStatus.resetCreditExpiresAtList.empty())
+    key += "|" + String(codexStatus.resetCreditExpiresAt);
   if (!force && key == lastResetCreditBadge) return;
+  int clearRows = max(rows, lastResetCreditRows);
+  int clearTop = max(15, 29 - (clearRows - 1) * 19 / 2);
   lastResetCreditBadge = key;
+  lastResetCreditRows = rows;
   const int badgeX = 153;
   const int badgeW = 68;
   const int badgeCenterX = badgeX + badgeW / 2;
-  tft.fillRect(badgeX - 1, 27, badgeW + 2, 22, TFT_BLACK);
-  if (count.length() == 0) return;
-  tft.fillRoundRect(badgeX, 29, badgeW, 18, 5, TFT_BLACK);
-  tft.drawRoundRect(badgeX, 29, badgeW, 18, 5, TFT_GREEN);
-  int gap = expiry.length() > 0 ? 3 : 0;
-  int countWidth = tft.textWidth(count, 2);
-  int expiryWidth = expiry.length() > 0 ? tft.textWidth(expiry, 2) : 0;
-  int x = badgeCenterX - (countWidth + gap + expiryWidth) / 2;
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.drawString(count, x, 38, 2);
-  if (expiry.length() > 0)
-    tft.drawString(expiry, x + countWidth + gap, 38, 2);
+  if (clearRows > 0)
+    tft.fillRect(badgeX - 1, clearTop - 2, badgeW + 2,
+                 clearRows * 19 + 3, TFT_BLACK);
+  if (rows == 0) return;
+  int top = max(15, 29 - (rows - 1) * 19 / 2);
+  int badgeH = rows * 19 - 1;
+  tft.fillRoundRect(badgeX, top, badgeW, badgeH, 5, TFT_BLACK);
+  tft.drawRoundRect(badgeX, top, badgeW, badgeH, 5, TFT_GREEN);
+  for (int i = 0; i < rows; i++) {
+    bool hasDetails = !codexStatus.resetCreditExpiresAtList.empty();
+    String count = hasDetails ? "R*1" : "R*" + String(codexStatus.resetCreditsAvailable);
+    uint32_t expiresAt = hasDetails ? codexStatus.resetCreditExpiresAtList[i]
+                                    : codexStatus.resetCreditExpiresAt;
+    String expiry;
+    if (expiresAt > 0) {
+      int year, month, day, hour, minute, second, weekday;
+      epochToLocal(expiresAt, bridgeUtcOffsetS,
+                   year, month, day, hour, minute, second, weekday);
+      expiry = String(month) + "/" + String(day);
+    }
+    int rowTop = top + i * 19;
+    int gap = expiry.length() > 0 ? 3 : 0;
+    int countWidth = tft.textWidth(count, 2);
+    int expiryWidth = expiry.length() > 0 ? tft.textWidth(expiry, 2) : 0;
+    int x = badgeCenterX - (countWidth + gap + expiryWidth) / 2;
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString(count, x, rowTop + 9, 2);
+    if (expiry.length() > 0)
+      tft.drawString(expiry, x + countWidth + gap, rowTop + 9, 2);
+  }
 }
 
 // Claude's ring percentage is only a real 5h quota. Unknown never becomes an
@@ -2548,6 +2575,12 @@ bool parseStatusJson(const String &payload, bool applyAlertState = true) {
     codexStatus.weeklyResetMin = x["weekly_reset_min"] | -1;
     codexStatus.resetCreditsAvailable = x["reset_credits_available"] | -1;
     codexStatus.resetCreditExpiresAt = x["reset_credit_expires_at"] | 0UL;
+    codexStatus.resetCreditExpiresAtList.clear();
+    JsonArray resetCreditExpirations = x["reset_credit_expires_at_list"].as<JsonArray>();
+    for (JsonVariant value : resetCreditExpirations) {
+      uint32_t expiresAt = value | 0UL;
+      if (expiresAt > 0) codexStatus.resetCreditExpiresAtList.push_back(expiresAt);
+    }
     if (applyAlertState) {
       codexStatus.needsInput = x["needs_input"] | false;
       uint32_t incomingCompletionAt = x["completion_at"] | 0UL;

@@ -84,6 +84,11 @@ static class Program
             Environment.Exit(TestMiniMaxQuotaParser());
             return;
         }
+        if (args.Length >= 1 && args[0] == "--test-codex-reset-credits-parser")
+        {
+            Environment.Exit(TestCodexResetCreditsParser());
+            return;
+        }
         if (args.Length >= 1 && args[0] == "--test-webview-recovery")
         {
             Environment.Exit(TestWebViewRecovery());
@@ -348,6 +353,48 @@ static class Program
         Console.Error.WriteLine(passed
             ? $"[test-minimax-quota-parser] 5H={fiveHourMin:0.0}m, weekly={weeklyMin:0.0}m"
             : $"[test-minimax-quota-parser] failed: 5H={fiveHourMin:0.0}m, weekly={weeklyMin:0.0}m");
+        return passed ? 0 : 1;
+    }
+
+    static int TestCodexResetCreditsParser()
+    {
+        var first = DateTimeOffset.UtcNow.AddDays(3);
+        var second = DateTimeOffset.UtcNow.AddDays(10);
+        var json = $$"""
+        {
+          "available_count": 2,
+          "credits": [
+            { "status": "available", "expires_at": "{{second:O}}" },
+            { "status": "used", "expires_at": "{{first.AddDays(20):O}}" },
+            { "status": "available", "expires_at": "{{first:O}}" }
+          ]
+        }
+        """;
+        using var source = JsonDocument.Parse(json);
+        var parsed = UsageFetcher.ParseCodexResetCredits(source.RootElement);
+        var rows = MirrorControl.ResetCreditRows(parsed.Available, parsed.ExpiresAt,
+            parsed.ExpiresAtList);
+        var legacyRows = MirrorControl.ResetCreditRows(2, parsed.ExpiresAt, null);
+        var snapshot = new StatusSnapshot(new ClaudeStatus(), new CodexStatus
+        {
+            ResetCreditsAvailable = parsed.Available,
+            ResetCreditExpiresAt = parsed.ExpiresAt,
+            ResetCreditExpiresAtList = parsed.ExpiresAtList,
+        }, new DomesticStatus(), DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        using var wire = JsonDocument.Parse(snapshot.ToJson());
+        var wireDates = wire.RootElement.GetProperty("codex")
+            .GetProperty("reset_credit_expires_at_list");
+        var passed = parsed.Available == 2
+            && parsed.ExpiresAtList.Length == 2
+            && parsed.ExpiresAtList[0] == first.ToUnixTimeSeconds()
+            && parsed.ExpiresAtList[1] == second.ToUnixTimeSeconds()
+            && rows.Length == 2
+            && rows.All(row => row.Count == "R*1" && row.Expiry.Length > 0)
+            && legacyRows.Length == 1 && legacyRows[0].Count == "R*2"
+            && wireDates.GetArrayLength() == 2;
+        Console.Error.WriteLine(passed
+            ? "[test-codex-reset-credits-parser] two available credits preserved as two display rows"
+            : "[test-codex-reset-credits-parser] failed");
         return passed ? 0 : 1;
     }
 

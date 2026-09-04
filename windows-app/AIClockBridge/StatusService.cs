@@ -37,6 +37,7 @@ class CodexStatus
     public int? WeeklyResetMin;
     public int? ResetCreditsAvailable;
     public long? ResetCreditExpiresAt;
+    public long[] ResetCreditExpiresAtList = Array.Empty<long>();
     public bool NeedsInput;
     public long CompletionAt; // Unix seconds of the latest explicit Stop event
     public long CompletionSeq;
@@ -121,6 +122,10 @@ class StatusSnapshot
             WriteNullable(w, "weekly_reset_min", Codex.WeeklyResetMin);
             WriteNullable(w, "reset_credits_available", Codex.ResetCreditsAvailable);
             WriteNullable(w, "reset_credit_expires_at", Codex.ResetCreditExpiresAt);
+            w.WriteStartArray("reset_credit_expires_at_list");
+            foreach (var expiresAt in Codex.ResetCreditExpiresAtList ?? Array.Empty<long>())
+                w.WriteNumberValue(expiresAt);
+            w.WriteEndArray();
             w.WriteBoolean("needs_input", Codex.NeedsInput);
             w.WriteNumber("completion_at", Codex.CompletionAt);
             w.WriteNumber("completion_seq", Codex.CompletionSeq);
@@ -559,6 +564,8 @@ sealed class StatusService
                 }
                 snap.Codex.ResetCreditsAvailable = xu.ResetCreditsAvailable;
                 snap.Codex.ResetCreditExpiresAt = xu.ResetCreditExpiresAt;
+                snap.Codex.ResetCreditExpiresAtList = xu.ResetCreditExpiresAtList?.ToArray()
+                    ?? Array.Empty<long>();
             }
             if (DomesticUsage != null)
             {

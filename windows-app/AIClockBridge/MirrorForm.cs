@@ -31,6 +31,7 @@ sealed class MirrorControl : Control
     public int? WeeklyResetMin;
     public int? ResetCreditsAvailable;
     public long? ResetCreditExpiresAt;
+    public long[] ResetCreditExpiresAtList = Array.Empty<long>();
     public string Plan = "";
     public bool ShowingClaude = true;
     public bool DeviceOK;
@@ -324,7 +325,8 @@ sealed class MirrorControl : Control
         if (string.IsNullOrEmpty(Plan)) return;
         var color = PlanColor(Plan);
         using var font = new Font("Consolas", 10, FontStyle.Bold, GraphicsUnit.Pixel);
-        var hasResetBadge = !ShowingClaude && ResetCreditsAvailable.HasValue && ResetCreditsAvailable.Value > 0;
+        var hasResetBadge = !ShowingClaude && ((ResetCreditExpiresAtList?.Length ?? 0) > 0
+            || ResetCreditsAvailable.HasValue && ResetCreditsAvailable.Value > 0);
         var maxWidth = hasResetBadge ? 88 : 100;
         var width = Math.Clamp((int)Math.Ceiling(g.MeasureString(Plan, font).Width) + 12, 34, maxWidth);
         var rect = new RectangleF(61, 29, width, 18);
@@ -344,32 +346,47 @@ sealed class MirrorControl : Control
 
     void DrawResetCreditBadge(Graphics g)
     {
-        if (ShowingClaude || !ResetCreditsAvailable.HasValue || ResetCreditsAvailable.Value <= 0) return;
+        if (ShowingClaude) return;
+        var rows = ResetCreditRows(ResetCreditsAvailable, ResetCreditExpiresAt,
+            ResetCreditExpiresAtList);
+        if (rows.Length == 0) return;
         var color = Green;
         using var countFont = new Font("Consolas", 10, FontStyle.Bold, GraphicsUnit.Pixel);
         using var dateFont = new Font("Consolas", 10, FontStyle.Bold, GraphicsUnit.Pixel);
-        var rect = new RectangleF(153, 29, 68, 18);
-        using var path = RoundedRect(rect, 5);
         using var fill = new SolidBrush(Color.FromArgb(35, color));
         using var border = new Pen(color, 1);
         using var countText = new SolidBrush(Green);
         using var dateText = new SolidBrush(color);
-        var expiry = ResetCreditDate(ResetCreditExpiresAt);
-        var count = $"R*{ResetCreditsAvailable.Value}";
         using var fmt = (StringFormat)StringFormat.GenericTypographic.Clone();
         fmt.FormatFlags |= StringFormatFlags.NoWrap;
-        var countWidth = g.MeasureString(count, countFont, PointF.Empty, fmt).Width;
-        var dateWidth = expiry.Length > 0
-            ? g.MeasureString(expiry, dateFont, PointF.Empty, fmt).Width : 0;
-        var gap = expiry.Length > 0 ? 3f : 0;
-        var x = rect.X + (rect.Width - countWidth - gap - dateWidth) / 2;
+        var top = Math.Max(15f, 29f - (rows.Length - 1) * 9.5f);
+        var rect = new RectangleF(153, top, 68, rows.Length * 19 - 1);
+        using var path = RoundedRect(rect, 5);
         g.FillPath(fill, path);
         g.DrawPath(border, path);
-        g.DrawString(count, countFont, countText, x,
-            rect.Y + (rect.Height - countFont.GetHeight(g)) / 2, fmt);
-        if (expiry.Length > 0)
-            g.DrawString(expiry, dateFont, dateText, x + countWidth + gap,
-                rect.Y + (rect.Height - dateFont.GetHeight(g)) / 2, fmt);
+        for (var i = 0; i < rows.Length; i++)
+        {
+            var rowRect = new RectangleF(153, top + i * 19, 68, 18);
+            var countWidth = g.MeasureString(rows[i].Count, countFont, PointF.Empty, fmt).Width;
+            var dateWidth = rows[i].Expiry.Length > 0
+                ? g.MeasureString(rows[i].Expiry, dateFont, PointF.Empty, fmt).Width : 0;
+            var gap = rows[i].Expiry.Length > 0 ? 3f : 0;
+            var x = rowRect.X + (rowRect.Width - countWidth - gap - dateWidth) / 2;
+            g.DrawString(rows[i].Count, countFont, countText, x,
+                rowRect.Y + (rowRect.Height - countFont.GetHeight(g)) / 2, fmt);
+            if (rows[i].Expiry.Length > 0)
+                g.DrawString(rows[i].Expiry, dateFont, dateText, x + countWidth + gap,
+                    rowRect.Y + (rowRect.Height - dateFont.GetHeight(g)) / 2, fmt);
+        }
+    }
+
+    internal static (string Count, string Expiry)[] ResetCreditRows(
+        int? available, long? legacyExpiry, long[] expirations)
+    {
+        if (expirations != null && expirations.Length > 0)
+            return expirations.Select(epoch => ("R*1", ResetCreditDate(epoch))).ToArray();
+        if (!available.HasValue || available.Value <= 0) return Array.Empty<(string, string)>();
+        return new[] { ($"R*{available.Value}", ResetCreditDate(legacyExpiry)) };
     }
 
     static Color PlanColor(string plan) => plan switch
@@ -1314,6 +1331,7 @@ sealed class MirrorForm : Form
             _mirror.WeeklyResetMin = snap.Claude.SevenDayResetMin;
             _mirror.ResetCreditsAvailable = null;
             _mirror.ResetCreditExpiresAt = null;
+            _mirror.ResetCreditExpiresAtList = Array.Empty<long>();
             _mirror.Plan = snap.Claude.Plan;
             _mirror.NeedsInput = snap.Claude.NeedsInput;
         }
@@ -1326,6 +1344,8 @@ sealed class MirrorForm : Form
             _mirror.WeeklyResetMin = snap.Codex.WeeklyResetMin;
             _mirror.ResetCreditsAvailable = snap.Codex.ResetCreditsAvailable;
             _mirror.ResetCreditExpiresAt = snap.Codex.ResetCreditExpiresAt;
+            _mirror.ResetCreditExpiresAtList = snap.Codex.ResetCreditExpiresAtList?.ToArray()
+                ?? Array.Empty<long>();
             _mirror.Plan = snap.Codex.Plan;
             _mirror.NeedsInput = snap.Codex.NeedsInput;
         }

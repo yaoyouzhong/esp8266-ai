@@ -98,8 +98,9 @@ curl -s http://localhost:8765/status | python3 -m json.tool
   "claude": {"status": "working", "tokens_today": 4868001, "session_min": 26, "session_window_min": 300},
   "codex":  {"status": "offline", "tokens_today": 61471, "primary_pct": 1.0, "primary_window_min": 300,
              "primary_reset_min": 0, "weekly_pct": 2.0, "weekly_window_min": 10080,
-             "weekly_reset_min": 8729, "reset_credits_available": 1,
-             "reset_credit_expires_at": 1786556041},
+             "weekly_reset_min": 8729, "reset_credits_available": 2,
+             "reset_credit_expires_at": 1786556041,
+             "reset_credit_expires_at_list": [1786556041, 1789148041]},
   "domestic": {"active_provider": "qwen", "active": {"plan_pct": 99.18,
                "plan_reset_at": 1785808800, "plan_reset_min": 23040}}
 }
@@ -115,8 +116,9 @@ LaunchAgent（`~/Library/LaunchAgents/`）即可，未内置，按需再加。
 
 - **额度（两家都是真实值）**：app 每 2 分钟调一次官方用量接口（见开头），拿到
   5h / 周窗口的已用百分比和重置时间；Codex 同时读取
-  `/wham/rate-limit-reset-credits` 的 `available_count` 和最早到期的可用 `credits[].expires_at`，
-  作为剩余可用重置次数及到期日，合并进 `/status` 下发给设备。接口 429 限流时
+  `/wham/rate-limit-reset-credits` 的 `available_count` 和全部可用 `credits[].expires_at`，
+  按到期时间排序后合并进 `/status` 下发给设备；单值 `reset_credit_expires_at` 保留最早日期以兼容旧固件，
+  数组 `reset_credit_expires_at_list` 供新版设备按一条机会一行显示。接口 429 限流时
   自动退避 5 分钟并沿用上一次的数值。Codex JSONL 中 `limit_id` 不为 `codex` 的命名额度
   属于模型专属窗口，不得覆盖或补充账户 5h / 周额度。
 - Claude 的 OAuth token 存在 Keychain，app 通过 `security` CLI 读取，第一次运行

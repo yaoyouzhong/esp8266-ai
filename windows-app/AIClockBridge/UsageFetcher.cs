@@ -21,6 +21,7 @@ class ProviderUsage
     public int? WeeklyResetMin;
     public int? ResetCreditsAvailable;  // account-owned Codex reset credits
     public long? ResetCreditExpiresAt;   // earliest available credit, Unix seconds
+    public long[] ResetCreditExpiresAtList; // every available credit, sorted by expiry
     public string Error;
     public DateTime? FetchedAt;
     public bool RateLimited;
@@ -116,13 +117,17 @@ sealed class UsageFetcher
                 WeeklyResetMin = old.WeeklyResetMin,
                 ResetCreditsAvailable = old.ResetCreditsAvailable,
                 ResetCreditExpiresAt = old.ResetCreditExpiresAt,
+                ResetCreditExpiresAtList = old.ResetCreditExpiresAtList?.ToArray(),
                 FetchedAt = old.FetchedAt,
                 Error = fresh.Error,
             };
         }
         if (fresh.ResetCreditsAvailable == old.ResetCreditsAvailable
             && !fresh.ResetCreditExpiresAt.HasValue)
+        {
             fresh.ResetCreditExpiresAt = old.ResetCreditExpiresAt;
+            fresh.ResetCreditExpiresAtList = old.ResetCreditExpiresAtList?.ToArray();
+        }
         return fresh;
     }
 
@@ -198,6 +203,7 @@ sealed class UsageFetcher
         WeeklyResetMin = usage.WeeklyResetMin,
         ResetCreditsAvailable = usage.ResetCreditsAvailable,
         ResetCreditExpiresAt = usage.ResetCreditExpiresAt,
+        ResetCreditExpiresAtList = usage.ResetCreditExpiresAtList?.ToArray(),
         FetchedAt = usage.FetchedAt,
     };
 
@@ -370,6 +376,7 @@ sealed class UsageFetcher
             if (resetCreditDetails.Available.HasValue)
                 usage.ResetCreditsAvailable = resetCreditDetails.Available;
             usage.ResetCreditExpiresAt = resetCreditDetails.ExpiresAt;
+            usage.ResetCreditExpiresAtList = resetCreditDetails.ExpiresAtList;
             usage.FetchedAt = DateTime.UtcNow;
         }
         catch
@@ -379,7 +386,7 @@ sealed class UsageFetcher
         return usage;
     }
 
-    static async Task<(int? Available, long? ExpiresAt)> FetchCodexResetCredits(
+    static async Task<(int? Available, long? ExpiresAt, long[] ExpiresAtList)> FetchCodexResetCredits(
         string accessToken, string accountId)
     {
         using var req = new HttpRequestMessage(HttpMethod.Get,
@@ -392,30 +399,37 @@ sealed class UsageFetcher
         try
         {
             using var resp = await Http.SendAsync(req);
-            if (!resp.IsSuccessStatusCode) return (null, null);
+            if (!resp.IsSuccessStatusCode) return (null, null, null);
             using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-            var available = IntOrNull(doc.RootElement, "available_count");
-            long? earliest = null;
-            if (doc.RootElement.TryGetProperty("credits", out var credits)
-                && credits.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var credit in credits.EnumerateArray())
-                {
-                    if (!string.Equals(StringOrNull(credit, "status"), "available",
-                        StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    var expires = StringOrNull(credit, "expires_at");
-                    if (!DateTimeOffset.TryParse(expires, out var parsed)) continue;
-                    var epoch = parsed.ToUnixTimeSeconds();
-                    if (!earliest.HasValue || epoch < earliest.Value) earliest = epoch;
-                }
-            }
-            return (available, earliest);
+            return ParseCodexResetCredits(doc.RootElement);
         }
         catch
         {
-            return (null, null);
+            return (null, null, null);
         }
+    }
+
+    internal static (int? Available, long? ExpiresAt, long[] ExpiresAtList)
+        ParseCodexResetCredits(JsonElement root)
+    {
+        var available = IntOrNull(root, "available_count");
+        var expirations = new List<long>();
+        if (root.TryGetProperty("credits", out var credits)
+            && credits.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var credit in credits.EnumerateArray())
+            {
+                if (!string.Equals(StringOrNull(credit, "status"), "available",
+                    StringComparison.OrdinalIgnoreCase))
+                    continue;
+                var expires = StringOrNull(credit, "expires_at");
+                if (DateTimeOffset.TryParse(expires, out var parsed))
+                    expirations.Add(parsed.ToUnixTimeSeconds());
+            }
+        }
+        expirations.Sort();
+        return (available, expirations.Count > 0 ? expirations[0] : null,
+            expirations.ToArray());
     }
 
     static void AssignCodexWindow(ProviderUsage usage, JsonElement window,
