@@ -1464,7 +1464,7 @@ void drawDomesticScreen(bool force = false) {
       const String caption = "AVAILABLE BALANCE";
       const int areaX = 20, areaY = 62, areaW = 200, areaH = 106;
       const int maxContentW = areaW - 16, maxContentH = areaH - 16;
-      int captionFont = 2, valueFont = 6, currencyFont = 4;
+      int captionFont = 2, valueFont = 7, currencyFont = 4;
       bool scaleValue = true;
       bool scaleCurrency = true;
       int lineGap = 8, valueGap = suffix.length() ? 6 : 0;
@@ -1517,27 +1517,32 @@ void drawDomesticScreen(bool force = false) {
       tft.setTextColor(mutedColor, TFT_BLACK);
       tft.drawString(caption, centerX - captionWidth / 2, top, captionFont);
       if (scaleValue) {
-        if (!drawScaledPackedText(planNumber, valueLeft, valueTop, 6,
+        if (!drawScaledPackedText(planNumber, valueLeft, valueTop, 7,
                                   sourceNumberWidth, 48, numberWidth, 40,
                                   numberColor, true)) {
           // Keep the previous rendering if the roughly 1KB bitmap cannot be allocated.
           numberWidth = sourceNumberWidth;
-          valueHeight = tft.fontHeight(6);
+          valueHeight = tft.fontHeight(7);
           valueWidth = numberWidth + valueGap + suffixWidth;
           valueLeft = centerX - valueWidth / 2;
-          drawBoldString(planNumber, valueLeft, valueTop, 6, numberColor);
+          scaleValue = false;
+          drawBoldString(planNumber, valueLeft, valueTop, 7, numberColor);
         }
       } else {
         drawBoldString(planNumber, valueLeft, valueTop, valueFont, numberColor);
       }
       if (suffixWidth) {
         tft.setTextColor(TFT_GREEN, TFT_BLACK);
-        int baselineCorrection = scaleCurrency && valueHeight == 40 ? 8
-            : scaleCurrency && valueHeight == 48 ? 10
-            : scaleCurrency && valueHeight == 26 ? 5
-            : valueFont == currencyFont ? 0 : 2;
-        int currencyTop = valueTop + valueHeight
-            - currencyHeight - baselineCorrection;
+        int valueSourceHeight = tft.fontHeight(valueFont);
+        int valueBaseline = pgm_read_byte(&fontdata[valueFont].baseline);
+        if (scaleValue)
+          valueBaseline = (valueBaseline * valueHeight + valueSourceHeight / 2) / valueSourceHeight;
+        int currencySourceHeight = tft.fontHeight(currencyFont);
+        int currencyBaseline = pgm_read_byte(&fontdata[currencyFont].baseline);
+        if (scaleCurrency)
+          currencyBaseline = (currencyBaseline * currencyHeight + currencySourceHeight / 2)
+              / currencySourceHeight;
+        int currencyTop = valueTop + valueBaseline - currencyBaseline;
         int currencyLeft = valueLeft + numberWidth + valueGap;
         if (scaleCurrency) {
           if (!drawScaledPackedText(suffix, currencyLeft, currencyTop, 4,

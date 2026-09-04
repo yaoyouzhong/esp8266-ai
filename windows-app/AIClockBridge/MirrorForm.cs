@@ -522,20 +522,20 @@ sealed class MirrorControl : Control
             if (p.UsedCost.HasValue)
             {
                 var amount = p.UsedCost.Value.ToString("0.00", CultureInfo.InvariantCulture);
-                var amountWidth = g.MeasureString(amount, resetValueFont).Width;
+                var amountWidth = g.MeasureString(amount, labelFont).Width;
                 var currencyWidth = string.IsNullOrEmpty(p.Currency)
-                    ? 0 : g.MeasureString(p.Currency, resetValueFont).Width;
+                    ? 0 : g.MeasureString(p.Currency, labelFont).Width;
                 var gap = currencyWidth > 0 ? 5 : 0;
                 var left = 153.5f - (amountWidth + gap + currencyWidth) / 2;
-                g.DrawString(amount, resetValueFont, numberBrush,
+                g.DrawString(amount, labelFont, numberBrush,
                     new RectangleF(left, 177, amountWidth, 38), centered);
                 if (currencyWidth > 0)
-                    g.DrawString(p.Currency, resetValueFont, greenBrush,
+                    g.DrawString(p.Currency, labelFont, greenBrush,
                         new RectangleF(left + amountWidth + gap, 177, currencyWidth, 38), centered);
             }
             else
             {
-                g.DrawString("--", resetValueFont, numberBrush,
+                g.DrawString("--", labelFont, numberBrush,
                     new RectangleF(87, 177, 133, 38), centered);
             }
         }
