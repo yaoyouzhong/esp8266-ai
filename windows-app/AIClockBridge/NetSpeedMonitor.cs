@@ -22,9 +22,13 @@ sealed class NetSpeedMonitor
     long? _lastRx;
     long? _lastTx;
     DateTime? _lastAt;
+    NetworkInterface[] _interfaces = Array.Empty<NetworkInterface>();
+    DateTime _interfacesRefreshedAt = DateTime.MinValue;
+    int _sampling;
     System.Threading.Timer _timer;
 
     const int Capacity = 720; // 3 minutes at 4Hz
+    static readonly TimeSpan InterfaceRefreshInterval = TimeSpan.FromSeconds(30);
 
     public void Start()
     {
@@ -98,44 +102,52 @@ sealed class NetSpeedMonitor
 
     void SampleNow()
     {
-        var (rx, tx) = Counters();
-        var now = DateTime.UtcNow;
-        var lr = _lastRx;
-        var lt = _lastTx;
-        var la = _lastAt;
-        _lastRx = rx;
-        _lastTx = tx;
-        _lastAt = now;
-        if (!lr.HasValue || !lt.HasValue || !la.HasValue) return;
-        var dt = (now - la.Value).TotalSeconds;
-        if (dt <= 0.2) return;
-        // counters can reset when an adapter bounces; treat negatives as zero
-        var dRx = Math.Max(0, rx - lr.Value);
-        var dTx = Math.Max(0, tx - lt.Value);
-        var sample = new Sample(dRx / dt, dTx / dt);
-        lock (_lock)
+        // Timer callbacks may overlap when adapter enumeration stalls in a
+        // network filter driver. Never let delayed samples build a work queue.
+        if (Interlocked.Exchange(ref _sampling, 1) != 0) return;
+        try
         {
-            _samples.Add(sample);
-            _totalSamples++;
-            if (_samples.Count > Capacity) _samples.RemoveRange(0, _samples.Count - Capacity);
+            var now = DateTime.UtcNow;
+            var (rx, tx) = Counters(now);
+            var lr = _lastRx;
+            var lt = _lastTx;
+            var la = _lastAt;
+            _lastRx = rx;
+            _lastTx = tx;
+            _lastAt = now;
+            if (!lr.HasValue || !lt.HasValue || !la.HasValue) return;
+            var dt = (now - la.Value).TotalSeconds;
+            if (dt <= 0.2) return;
+            // counters can reset when an adapter bounces; treat negatives as zero
+            var dRx = Math.Max(0, rx - lr.Value);
+            var dTx = Math.Max(0, tx - lt.Value);
+            var sample = new Sample(dRx / dt, dTx / dt);
+            lock (_lock)
+            {
+                _samples.Add(sample);
+                _totalSamples++;
+                if (_samples.Count > Capacity) _samples.RemoveRange(0, _samples.Count - Capacity);
+            }
         }
+        finally { Volatile.Write(ref _sampling, 0); }
     }
 
-    static (long, long) Counters()
+    (long, long) Counters(DateTime now)
     {
         long rx = 0, tx = 0;
         try
         {
-            foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+            if (now - _interfacesRefreshedAt >= InterfaceRefreshInterval)
             {
-                if (nic.OperationalStatus != OperationalStatus.Up) continue;
-                if (nic.NetworkInterfaceType != NetworkInterfaceType.Ethernet
-                    && nic.NetworkInterfaceType != NetworkInterfaceType.Wireless80211) continue;
-                var desc = nic.Description.ToLowerInvariant();
-                // skip common virtual adapters that report as Ethernet
-                if (desc.Contains("virtual") || desc.Contains("vpn") || desc.Contains("tap")
-                    || desc.Contains("hyper-v") || desc.Contains("vmware")
-                    || desc.Contains("loopback") || desc.Contains("wintun")) continue;
+                // Throttle retries too: a broken filter driver must not turn an
+                // enumeration failure into a 4 Hz kernel call loop.
+                _interfacesRefreshedAt = now;
+                _interfaces = NetworkInterface.GetAllNetworkInterfaces()
+                    .Where(IsPhysicalConnectedInterface)
+                    .ToArray();
+            }
+            foreach (var nic in _interfaces)
+            {
                 var stats = nic.GetIPStatistics();
                 rx += stats.BytesReceived;
                 tx += stats.BytesSent;
@@ -146,5 +158,20 @@ sealed class NetSpeedMonitor
             // adapter enumeration can transiently fail; keep last counters
         }
         return (rx, tx);
+    }
+
+    static bool IsPhysicalConnectedInterface(NetworkInterface nic)
+    {
+        if (nic.OperationalStatus != OperationalStatus.Up) return false;
+        if (nic.NetworkInterfaceType != NetworkInterfaceType.Ethernet
+            && nic.NetworkInterfaceType != NetworkInterfaceType.Wireless80211) return false;
+        var desc = nic.Description.ToLowerInvariant();
+        if (desc.Contains("virtual") || desc.Contains("vpn") || desc.Contains("tap")
+            || desc.Contains("hyper-v") || desc.Contains("vmware")
+            || desc.Contains("loopback") || desc.Contains("wintun")) return false;
+        // Npcap/WFP/QoS filter bindings appear as Up Ethernet interfaces but do
+        // not own an IP address. Sampling them duplicates traffic and invokes
+        // their kernel drivers four times per second.
+        return nic.GetIPProperties().UnicastAddresses.Count > 0;
     }
 }
